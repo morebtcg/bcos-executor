@@ -62,7 +62,7 @@ PrecompiledExecResult::Ptr KVTableFactoryPrecompiled::call(
                            << LOG_KV("func", func);
 
     codec::abi::ContractABICodec abi(nullptr);
-    auto callResult = m_precompiledExecResultFactory->createPrecompiledResult();
+    auto callResult = std::make_shared<PrecompiledExecResult>();
     auto gasPricer = m_precompiledGasFactory->createPrecompiledGas();
     gasPricer->setMemUsed(_param.size());
 
@@ -128,7 +128,8 @@ PrecompiledExecResult::Ptr KVTableFactoryPrecompiled::call(
             }
         }
 
-        checkNameValidate(tableName, keyField, fieldNameList);
+        std::vector<std::string> keyFieldList{keyField};
+        checkNameValidate(tableName, keyFieldList, fieldNameList);
 
         valueFiled = boost::join(fieldNameList, ",");
         if (valueFiled.size() > (size_t)SYS_TABLE_VALUE_FIELD_MAX_LENGTH)
