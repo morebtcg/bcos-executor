@@ -24,7 +24,6 @@
 #include "PrecompiledResult.h"
 #include "Utilities.h"
 #include <bcos-framework/interfaces/protocol/Exceptions.h>
-#include <bcos-framework/libcodec/abi/ContractABICodec.h>
 #include <boost/algorithm/string.hpp>
 #include <boost/algorithm/string/classification.hpp>
 #include <boost/algorithm/string/split.hpp>
@@ -62,7 +61,7 @@ PrecompiledExecResult::Ptr KVTableFactoryPrecompiled::call(
     PRECOMPILED_LOG(DEBUG) << LOG_BADGE("KVTableFactory") << LOG_DESC("call")
                            << LOG_KV("func", func);
 
-    codec::abi::ContractABICodec abi(nullptr);
+    m_codec = std::make_shared<PrecompiledCodec>(_context->hashHandler(), _context->isWasm());
     auto callResult = std::make_shared<PrecompiledExecResult>();
     auto gasPricer = m_precompiledGasFactory->createPrecompiledGas();
     gasPricer->setMemUsed(_param.size());
@@ -70,27 +69,49 @@ PrecompiledExecResult::Ptr KVTableFactoryPrecompiled::call(
     if (func == name2Selector[KV_TABLE_FACTORY_METHOD_OPEN_TABLE])
     {  // openTable(string)
         std::string tableName;
-        abi.abiOut(data, tableName);
+        m_codec->decode(data, tableName);
         tableName = precompiled::getTableName(tableName);
         PRECOMPILED_LOG(DEBUG) << LOG_BADGE("KVTableFactory") << LOG_KV("openTable", tableName);
-        Address address;
         auto table = m_memoryTableFactory->openTable(tableName);
         gasPricer->appendOperation(InterfaceOpcode::OpenTable);
-        if (table)
+        if (_context->isWasm())
         {
-            auto kvTablePrecompiled = std::make_shared<KVTablePrecompiled>();
-            kvTablePrecompiled->setTable(table);
-            address = Address(_context->registerPrecompiled(kvTablePrecompiled));
+            std::string address;
+            if (table)
+            {
+                auto kvTablePrecompiled = std::make_shared<KVTablePrecompiled>();
+                kvTablePrecompiled->setTable(table);
+                address = _context->registerPrecompiled(kvTablePrecompiled);
+            }
+            else
+            {
+                PRECOMPILED_LOG(WARNING)
+                        << LOG_BADGE("KVTableFactoryPrecompiled") << LOG_DESC("Open new table failed")
+                        << LOG_KV("table name", tableName);
+                BOOST_THROW_EXCEPTION(
+                    PrecompiledError() << errinfo_comment(tableName + " does not exist"));
+            }
+            callResult->setExecResult(m_codec->encode(address));
         }
         else
         {
-            PRECOMPILED_LOG(WARNING)
-                << LOG_BADGE("KVTableFactoryPrecompiled") << LOG_DESC("Open new table failed")
-                << LOG_KV("table name", tableName);
-            BOOST_THROW_EXCEPTION(
-                PrecompiledError() << errinfo_comment(tableName + " does not exist"));
+            Address address;
+            if (table)
+            {
+                auto kvTablePrecompiled = std::make_shared<KVTablePrecompiled>();
+                kvTablePrecompiled->setTable(table);
+                address = Address(_context->registerPrecompiled(kvTablePrecompiled));
+            }
+            else
+            {
+                PRECOMPILED_LOG(WARNING)
+                        << LOG_BADGE("KVTableFactoryPrecompiled") << LOG_DESC("Open new table failed")
+                        << LOG_KV("table name", tableName);
+                BOOST_THROW_EXCEPTION(
+                    PrecompiledError() << errinfo_comment(tableName + " does not exist"));
+            }
+            callResult->setExecResult(m_codec->encode(address));
         }
-        callResult->setExecResult(abi.abiIn("", address));
     }
     else if (func == name2Selector[KV_TABLE_FACTORY_METHOD_CREATE_TABLE])
     {  // createTable(string,string,string)
@@ -107,7 +128,7 @@ PrecompiledExecResult::Ptr KVTableFactoryPrecompiled::call(
         std::string keyField;
         std::string valueFiled;
 
-        abi.abiOut(data, tableName, keyField, valueFiled);
+        m_codec->decode(data, tableName, keyField, valueFiled);
         PRECOMPILED_LOG(INFO) << LOG_BADGE("KVTableFactory") << LOG_KV("createTable", tableName)
                               << LOG_KV("keyField", keyField) << LOG_KV("valueFiled", valueFiled);
 
@@ -162,7 +183,7 @@ PrecompiledExecResult::Ptr KVTableFactoryPrecompiled::call(
         {
             gasPricer->appendOperation(InterfaceOpcode::CreateTable);
         }
-        getErrorCodeOut(callResult->mutableExecResult(), result);
+        getErrorCodeOut(callResult->mutableExecResult(), result, m_codec);
     }
     else
     {
