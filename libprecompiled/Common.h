@@ -52,6 +52,16 @@ static const char* const SYS_VALUE = "value";
 static const char* const SYS_KEY = "key";
 static const char* const SYS_CONFIG_ENABLE_BLOCK_NUMBER = "enable_block_number";
 
+/// FileSystem table keys
+static const std::string FS_KEY_TYPE = "type";
+static const std::string FS_KEY_SUB = "subdirectories";
+static const std::string FS_KEY_NUM = "enable_number";
+
+/// FileSystem file type
+static const std::string FS_TYPE_DIR = "directory";
+static const std::string FS_TYPE_CONTRACT = "contract";
+static const std::string FS_TYPE_LINK = "link";
+
 /// SYS_CONSENSUS table fields
 static const char* const NODE_TYPE = "type";
 static const char* const NODE_WEIGHT = "weight";
@@ -69,17 +79,17 @@ const int USER_TABLE_NAME_MAX_LENGTH_S = 50;
 const int USER_TABLE_FIELD_VALUE_MAX_LENGTH = 16 * 1024 * 1024 - 1;
 
 // Define precompiled contract address
-const char* const SYS_CONFIG_NAME = "/sys/sys_config";
-const char* const TABLE_FACTORY_NAME = "/sys/table_factory";
-const char* const CRUD_NAME = "/sys/crud";
-const char* const CONSENSUS_NAME = "/sys/consensus";
-const char* const CNS_NAME = "/sys/cns";
-const char* const PERMISSION_NAME = "/sys/permission";
-const char* const PARALLEL_CONFIG_NAME = "/sys/parallel_config";
-const char* const CONTRACT_LIFECYCLE_NAME = "/sys/contract_life_cycle";
-const char* const CHAIN_GOVERNANCE_NAME = "/sys/governance";
-const char* const KV_TABLE_FACTORY_NAME = "/sys/kv_table_factory";
-const char* const WORKING_SEALER_MGR_NAME = "/sys/sealer_manager";
+const char* const SYS_CONFIG_NAME = "/bin/status";
+const char* const TABLE_FACTORY_NAME = "/bin/storage";
+const char* const CRUD_NAME = "/bin/crud";
+const char* const CONSENSUS_NAME = "/bin/consensus";
+const char* const CNS_NAME = "/bin/cns";
+const char* const PERMISSION_NAME = "/bin/permission";
+const char* const PARALLEL_CONFIG_NAME = "/bin/parallel_config";
+//const char* const CONTRACT_LIFECYCLE_NAME = "/sys/contract_life_cycle";
+//const char* const CHAIN_GOVERNANCE_NAME = "/sys/governance";
+const char* const KV_TABLE_FACTORY_NAME = "/bin/kv_storage";
+//const char* const WORKING_SEALER_MGR_NAME = "/sys/sealer_manager";
 
 // precompiled contract for solidity
 const char* const SYS_CONFIG_ADDRESS = "0x1000";
@@ -111,90 +121,97 @@ const int TX_GAS_LIMIT_MIN = 100000;
 const unsigned SYSTEM_CONSENSUS_TIMEOUT_MIN = 3;
 const unsigned SYSTEM_CONSENSUS_TIMEOUT_MAX = (UINT_MAX / 1000);
 
-enum PrecompiledErrorCode : int {
-  // ChainGovernancePrecompiled -52099 ~ -52000
-  CODE_CURRENT_VALUE_IS_EXPECTED_VALUE = -52012,
-  CODE_ACCOUNT_FROZEN = -52011,
-  CODE_ACCOUNT_ALREADY_AVAILABLE = -52010,
-  CODE_INVALID_ACCOUNT_ADDRESS = -52009,
-  CODE_ACCOUNT_NOT_EXIST = -52008,
-  CODE_OPERATOR_NOT_EXIST = -52007,
-  CODE_OPERATOR_EXIST = -52006,
-  CODE_COMMITTEE_MEMBER_CANNOT_BE_OPERATOR = -52005,
-  CODE_OPERATOR_CANNOT_BE_COMMITTEE_MEMBER = -52004,
-  CODE_INVALID_THRESHOLD = -52003,
-  CODE_INVALID_REQUEST_PERMISSION_DENIED = -52002,
-  CODE_COMMITTEE_MEMBER_NOT_EXIST = -52001,
-  CODE_COMMITTEE_MEMBER_EXIST = -52000,
+enum PrecompiledErrorCode : int
+{
+    // FileSystemPrecompiled -53099 ~ -53000
+    CODE_FILE_NOT_EXIST = -53001,
 
-  // ContractLifeCyclePrecompiled -51999 ~ -51900
-  CODE_INVALID_REVOKE_LAST_AUTHORIZATION = -51907,
-  CODE_INVALID_NON_EXIST_AUTHORIZATION = -51906,
-  CODE_INVALID_NO_AUTHORIZED = -51905,
-  CODE_INVALID_TABLE_NOT_EXIST = -51904,
-  CODE_INVALID_CONTRACT_ADDRESS = -51903,
-  CODE_INVALID_CONTRACT_REPEAT_AUTHORIZATION = -51902,
-  CODE_INVALID_CONTRACT_AVAILABLE = -51901,
-  CODE_INVALID_CONTRACT_FROZEN = -51900,
+    // ChainGovernancePrecompiled -52099 ~ -52000
+    CODE_CURRENT_VALUE_IS_EXPECTED_VALUE = -52012,
+    CODE_ACCOUNT_FROZEN = -52011,
+    CODE_ACCOUNT_ALREADY_AVAILABLE = -52010,
+    CODE_INVALID_ACCOUNT_ADDRESS = -52009,
+    CODE_ACCOUNT_NOT_EXIST = -52008,
+    CODE_OPERATOR_NOT_EXIST = -52007,
+    CODE_OPERATOR_EXIST = -52006,
+    CODE_COMMITTEE_MEMBER_CANNOT_BE_OPERATOR = -52005,
+    CODE_OPERATOR_CANNOT_BE_COMMITTEE_MEMBER = -52004,
+    CODE_INVALID_THRESHOLD = -52003,
+    CODE_INVALID_REQUEST_PERMISSION_DENIED = -52002,
+    CODE_COMMITTEE_MEMBER_NOT_EXIST = -52001,
+    CODE_COMMITTEE_MEMBER_EXIST = -52000,
 
-  // RingSigPrecompiled -51899 ~ -51800
-  VERIFY_RING_SIG_FAILED = -51800,
+    // ContractLifeCyclePrecompiled -51999 ~ -51900
+    CODE_INVALID_REVOKE_LAST_AUTHORIZATION = -51907,
+    CODE_INVALID_NON_EXIST_AUTHORIZATION = -51906,
+    CODE_INVALID_NO_AUTHORIZED = -51905,
+    CODE_INVALID_TABLE_NOT_EXIST = -51904,
+    CODE_INVALID_CONTRACT_ADDRESS = -51903,
+    CODE_INVALID_CONTRACT_REPEAT_AUTHORIZATION = -51902,
+    CODE_INVALID_CONTRACT_AVAILABLE = -51901,
+    CODE_INVALID_CONTRACT_FROZEN = -51900,
 
-  // GroupSigPrecompiled -51799 ~ -51700
-  VERIFY_GROUP_SIG_FAILED = -51700,
+    // RingSigPrecompiled -51899 ~ -51800
+    VERIFY_RING_SIG_FAILED = -51800,
 
-  // PaillierPrecompiled -51699 ~ -51600
-  CODE_INVALID_CIPHERS = -51600,
+    // GroupSigPrecompiled -51799 ~ -51700
+    VERIFY_GROUP_SIG_FAILED = -51700,
 
-  // CRUDPrecompiled -51599 ~ -51500
-  CODE_INVALID_UPDATE_TABLE_KEY = -51503,
-  CODE_CONDITION_OPERATION_UNDEFINED = -51502,
-  CODE_PARSE_CONDITION_ERROR = -51501,
-  CODE_PARSE_ENTRY_ERROR = -51500,
+    // PaillierPrecompiled -51699 ~ -51600
+    CODE_INVALID_CIPHERS = -51600,
 
-  // DagTransferPrecompiled -51499 ~ -51400
-  CODE_INVALID_OPENTABLE_FAILED = -51406,
-  CODE_INVALID_BALANCE_OVERFLOW = -51405,
-  CODE_INVALID_INSUFFICIENT_BALANCE = -51404,
-  CODE_INVALID_USER_ALREADY_EXIST = -51403,
-  CODE_INVALID_USER_NOT_EXIST = -51402,
-  CODE_INVALID_AMOUNT = -51401,
-  CODE_INVALID_USER_NAME = -51400,
+    // CRUDPrecompiled -51599 ~ -51500
+    CODE_INVALID_UPDATE_TABLE_KEY = -51503,
+    CODE_CONDITION_OPERATION_UNDEFINED = -51502,
+    CODE_PARSE_CONDITION_ERROR = -51501,
+    CODE_PARSE_ENTRY_ERROR = -51500,
 
-  // SystemConfigPrecompiled -51399 ~ -51300
-  CODE_INVALID_CONFIGURATION_VALUES = -51300,
+    // DagTransferPrecompiled -51499 ~ -51400
+    CODE_INVALID_OPENTABLE_FAILED = -51406,
+    CODE_INVALID_BALANCE_OVERFLOW = -51405,
+    CODE_INVALID_INSUFFICIENT_BALANCE = -51404,
+    CODE_INVALID_USER_ALREADY_EXIST = -51403,
+    CODE_INVALID_USER_NOT_EXIST = -51402,
+    CODE_INVALID_AMOUNT = -51401,
+    CODE_INVALID_USER_NAME = -51400,
 
-  // CNSPrecompiled -51299 ~ -51200
-  CODE_VERSION_LENGTH_OVERFLOW = -51201,
-  CODE_ADDRESS_AND_VERSION_EXIST = -51200,
+    // SystemConfigPrecompiled -51399 ~ -51300
+    CODE_INVALID_CONFIGURATION_VALUES = -51300,
 
-  // ConsensusPrecompiled -51199 ~ -51100
-  CODE_LAST_SEALER = -51101,
-  CODE_INVALID_NODEID = -51100,
+    // CNSPrecompiled -51299 ~ -51200
+    CODE_VERSION_LENGTH_OVERFLOW = -51201,
+    CODE_ADDRESS_AND_VERSION_EXIST = -51200,
 
-  // PermissionPrecompiled -51099 ~ -51000
-  CODE_COMMITTEE_PERMISSION = -51004,
-  CODE_CONTRACT_NOT_EXIST = -51003,
-  CODE_TABLE_NAME_OVERFLOW = -51002,
-  CODE_TABLE_AND_ADDRESS_NOT_EXIST = -51001,
-  CODE_TABLE_AND_ADDRESS_EXIST = -51000,
+    // ConsensusPrecompiled -51199 ~ -51100
+    CODE_INVALID_NODE_ID = -51100,
+    CODE_LAST_SEALER = -51101,
+    CODE_INVALID_WEIGHT = -51102,
+    CODE_NODE_NOT_EXIST = -51103,
 
-  // Common error code among all precompiled contracts -50199 ~ -50100
-  CODE_ADDRESS_INVALID = -50102,
-  CODE_UNKNOW_FUNCTION_CALL = -50101,
-  CODE_TABLE_NOT_EXIST = -50100,
+    // PermissionPrecompiled -51099 ~ -51000
+    CODE_COMMITTEE_PERMISSION = -51004,
+    CODE_CONTRACT_NOT_EXIST = -51003,
+    CODE_TABLE_NAME_OVERFLOW = -51002,
+    CODE_TABLE_AND_ADDRESS_NOT_EXIST = -51001,
+    CODE_TABLE_AND_ADDRESS_EXIST = -51000,
 
-  // correct return: code great or equal 0
-  CODE_SUCCESS = 0
+    // Common error code among all precompiled contracts -50199 ~ -50100
+    CODE_ADDRESS_INVALID = -50102,
+    CODE_UNKNOW_FUNCTION_CALL = -50101,
+    CODE_TABLE_NOT_EXIST = -50100,
+
+    // correct return: code great or equal 0
+    CODE_SUCCESS = 0
 };
 
-enum ContractStatus {
-  Invalid = 0,
-  Available,
-  Frozen,
-  AddressNonExistent,
-  NotContractAddress,
-  Count
+enum ContractStatus
+{
+    Invalid = 0,
+    Available,
+    Frozen,
+    AddressNonExistent,
+    NotContractAddress,
+    Count
 };
 } // namespace precompiled
 } // namespace bcos

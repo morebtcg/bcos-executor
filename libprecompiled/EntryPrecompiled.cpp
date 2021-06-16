@@ -39,18 +39,18 @@ const char* const ENTRY_GETB_STR = "getBytes64(string)";
 const char* const ENTRY_GETB_STR32 = "getBytes32(string)";
 const char* const ENTRY_GET_STR = "getString(string)";
 
-EntryPrecompiled::EntryPrecompiled()
+EntryPrecompiled::EntryPrecompiled(crypto::Hash::Ptr _hashImpl) : Precompiled(_hashImpl)
 {
-    name2Selector[ENTRY_GET_INT] = getFuncSelector(ENTRY_GET_INT);
-    name2Selector[ENTRY_GET_UINT] = getFuncSelector(ENTRY_GET_UINT);
-    name2Selector[ENTRY_SET_STR_INT] = getFuncSelector(ENTRY_SET_STR_INT);
-    name2Selector[ENTRY_SET_STR_UINT] = getFuncSelector(ENTRY_SET_STR_UINT);
-    name2Selector[ENTRY_SET_STR_STR] = getFuncSelector(ENTRY_SET_STR_STR);
-    name2Selector[ENTRY_SET_STR_ADDR] = getFuncSelector(ENTRY_SET_STR_ADDR);
-    name2Selector[ENTRY_GETA_STR] = getFuncSelector(ENTRY_GETA_STR);
-    name2Selector[ENTRY_GETB_STR] = getFuncSelector(ENTRY_GETB_STR);
-    name2Selector[ENTRY_GETB_STR32] = getFuncSelector(ENTRY_GETB_STR32);
-    name2Selector[ENTRY_GET_STR] = getFuncSelector(ENTRY_GET_STR);
+    name2Selector[ENTRY_GET_INT] = getFuncSelector(ENTRY_GET_INT, _hashImpl);
+    name2Selector[ENTRY_GET_UINT] = getFuncSelector(ENTRY_GET_UINT, _hashImpl);
+    name2Selector[ENTRY_SET_STR_INT] = getFuncSelector(ENTRY_SET_STR_INT, _hashImpl);
+    name2Selector[ENTRY_SET_STR_UINT] = getFuncSelector(ENTRY_SET_STR_UINT, _hashImpl);
+    name2Selector[ENTRY_SET_STR_STR] = getFuncSelector(ENTRY_SET_STR_STR, _hashImpl);
+    name2Selector[ENTRY_SET_STR_ADDR] = getFuncSelector(ENTRY_SET_STR_ADDR, _hashImpl);
+    name2Selector[ENTRY_GETA_STR] = getFuncSelector(ENTRY_GETA_STR, _hashImpl);
+    name2Selector[ENTRY_GETB_STR] = getFuncSelector(ENTRY_GETB_STR, _hashImpl);
+    name2Selector[ENTRY_GETB_STR32] = getFuncSelector(ENTRY_GETB_STR32, _hashImpl);
+    name2Selector[ENTRY_GET_STR] = getFuncSelector(ENTRY_GET_STR, _hashImpl);
 }
 
 std::string EntryPrecompiled::toString()
@@ -75,8 +75,7 @@ PrecompiledExecResult::Ptr EntryPrecompiled::call(
         // getInt(string)
         std::string str;
         m_codec->decode(data, str);
-        // FIXME: use s256 when scale support
-        u256 num = boost::lexical_cast<u256>(m_entry->getField(str));
+        s256 num = boost::lexical_cast<s256>(m_entry->getField(str));
         gasPricer->appendOperation(InterfaceOpcode::GetInt);
         callResult->setExecResult(m_codec->encode(num));
     }
@@ -91,8 +90,7 @@ PrecompiledExecResult::Ptr EntryPrecompiled::call(
     else if (func == name2Selector[ENTRY_SET_STR_INT])
     {  // set(string,int256)
         std::string key;
-        // FIXME: use s256 when scale support
-        u256 num;
+        s256 num;
         m_codec->decode(data, key, num);
         auto value = boost::lexical_cast<std::string>(num);
         m_entry->setField(key, value);
