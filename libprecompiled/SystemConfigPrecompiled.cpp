@@ -81,23 +81,11 @@ PrecompiledExecResult::Ptr SystemConfigPrecompiled::call(
         if (tableFactory->checkAuthority(ledger::SYS_CONFIG, _origin))
         {
             table->setRow(configKey, entry);
-            auto ret = tableFactory->commit();
-            if (!ret.second && ret.second->errorCode() != 0)
-            {
-                PRECOMPILED_LOG(ERROR)
-                    << LOG_BADGE("SystemConfigPrecompiled") << LOG_DESC("table commit occurs error")
-                    << LOG_KV("errorCode", ret.second->errorCode())
-                    << LOG_KV("errorMsg", ret.second->errorMessage())
-                    << LOG_KV("configKey", configKey);
-                // FIXME: use unified code to return
-                result = ret.second->errorCode();
-            }
-            else
-            {
-                PRECOMPILED_LOG(DEBUG) << LOG_BADGE("SystemConfigPrecompiled")
-                                       << LOG_DESC("setValueByKey successfully");
-                result = 0;
-            }
+            PRECOMPILED_LOG(ERROR)
+                << LOG_BADGE("SystemConfigPrecompiled") << LOG_DESC("table commit occurs error")
+                << LOG_KV("configKey", configKey);
+            // FIXME: use unified code to return
+            result = 1;
         }
         else
         {
@@ -167,7 +155,7 @@ bool SystemConfigPrecompiled::checkValueValid(std::string const& key, std::strin
 std::pair<std::string, protocol::BlockNumber> SystemConfigPrecompiled::getSysConfigByKey(
     const std::string& _key, const storage::TableFactoryInterface::Ptr& _tableFactory) const
 {
-    auto table = _tableFactory->openTable(SYS_CONFIG);
+    auto table = _tableFactory->openTable(ledger::SYS_CONFIG);
     auto entry = table->getRow(_key);
     if (entry)
     {
