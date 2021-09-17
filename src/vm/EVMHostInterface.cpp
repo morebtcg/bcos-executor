@@ -17,10 +17,21 @@
  * @file EVMHostInterface.cpp
  * @author: xingqiangbai
  * @date: 2021-05-24
+ * @brief host context
+ * @file EVMHostInterface.cpp
+ * @author: ancelmo
+ * @date: 2021-09-13
  */
 
 #include "EVMHostInterface.h"
+#include "../executor/Common.h"
+#include "Common.h"
 #include "HostContext.h"
+#include "libutilities/Common.h"
+#include <evmc/evmc.h>
+#include <boost/algorithm/hex.hpp>
+#include <exception>
+#include <optional>
 
 using namespace std;
 
@@ -48,7 +59,15 @@ evmc_bytes32 getStorage(
     auto& hostContext = static_cast<HostContext&>(*_context);
 
     // programming assert for debug
-    assert(fromEvmC(*_addr) == hostContext.myAddress());
+    assert(fromEvmC(*_addr) == boost::algorithm::unhex(std::string(hostContext.myAddress())));
+
+    // auto value = toEvmC(hostContext.store(fromEvmC(*_key)));
+
+    // EXECUTOR_LOG(TRACE) << "Reading: "
+    //                     << boost::algorithm::hex_lower(std::string((char*)_key->bytes, 32)) << ", "
+    //                     << boost::algorithm::hex_lower(std::string((char*)value.bytes, 32));
+
+
     return toEvmC(hostContext.store(fromEvmC(*_key)));
 }
 
@@ -56,17 +75,19 @@ evmc_storage_status setStorage(evmc_host_context* _context, const evmc_address* 
     const evmc_bytes32* _key, const evmc_bytes32* _value)
 {
     auto& hostContext = static_cast<HostContext&>(*_context);
-    if (!hostContext.isPermitted())
-    {
-        BOOST_THROW_EXCEPTION(PermissionDenied());
-    }
-    assert(fromEvmC(*_addr) == hostContext.myAddress());
+
+    assert(fromEvmC(*_addr) == boost::algorithm::unhex(std::string(hostContext.myAddress())));
     u256 index = fromEvmC(*_key);
     u256 value = fromEvmC(*_value);
     u256 oldValue = hostContext.store(index);
 
-    if (value == oldValue)
-        return EVMC_STORAGE_UNCHANGED;
+    // EXECUTOR_LOG(TRACE) << "Writing: "
+    //                     << boost::algorithm::hex_lower(std::string((char*)_key->bytes, 32)) << ", "
+    //                     << boost::algorithm::hex_lower(std::string((char*)_value->bytes, 32));
+
+    // set the same value can update the version
+    // if (value == oldValue)
+    //     return EVMC_STORAGE_UNCHANGED;
 
     auto status = EVMC_STORAGE_MODIFIED;
     if (oldValue == 0)
@@ -82,67 +103,84 @@ evmc_storage_status setStorage(evmc_host_context* _context, const evmc_address* 
 
 evmc_bytes32 getBalance(evmc_host_context* _context, const evmc_address* _addr) noexcept
 {
-    auto& hostContext = static_cast<HostContext&>(*_context);
-    return toEvmC(hostContext.balance(fromEvmC(*_addr)));
+    //   auto &hostContext = static_cast<HostContext &>(*_context);
+    //   return toEvmC(hostContext.balance(fromEvmC(*_addr)));
+
+    // always return 0
+    (void)_context;
+    (void)_addr;
+    return toEvmC(h256(0));
 }
 
 size_t getCodeSize(evmc_host_context* _context, const evmc_address* _addr)
 {
-    auto& hostContext = static_cast<HostContext&>(*_context);
-    return hostContext.codeSizeAt(fromEvmC(*_addr));
+    //   auto &hostContext = static_cast<HostContext &>(*_context);
+    //   return hostContext.codeSizeAt(fromEvmC(*_addr));
+
+    // always return 1k
+    (void)_context;
+    (void)_addr;
+    return 1000;
 }
 
 evmc_bytes32 getCodeHash(evmc_host_context* _context, const evmc_address* _addr)
 {
-    auto& hostContext = static_cast<HostContext&>(*_context);
-    return toEvmC(hostContext.codeHashAt(fromEvmC(*_addr)));
+    //   auto &hostContext = static_cast<HostContext &>(*_context);
+    //   return toEvmC(hostContext.codeHashAt(fromEvmC(*_addr)));
+
+    // always return 1000
+    (void)_context;
+    (void)_addr;
+    return toEvmC(h256(1000));
 }
 
 /**
- * @brief : copy code between [_codeOffset, _codeOffset + _bufferSize] to bufferData
- *          if _codeOffset is larger than code length, then return 0;
- *          if _codeOffset + _bufferSize is larger than the end of the code, than only copy
+ * @brief : copy code between [_codeOffset, _codeOffset + _bufferSize] to
+ * bufferData if _codeOffset is larger than code length, then return 0; if
+ * _codeOffset + _bufferSize is larger than the end of the code, than only copy
  * [_codeOffset, _codeEnd]
- * @param _context : evm context, including to myAddress, caller, gas, origin, value, etc.
+ * @param _context : evm context, including to myAddress, caller, gas, origin,
+ * value, etc.
  * @param _addr: the evmc-address of the code
  * @param _codeOffset: the offset begin to copy code
  * @param _bufferData : buffer store the copied code
  * @param _bufferSize : code size to copy
  * @return size_t : return copied code size(in byte)
  */
-size_t copyCode(evmc_host_context* _context, const evmc_address* _addr, size_t _codeOffset,
-    uint8_t* _bufferData, size_t _bufferSize)
+size_t copyCode(evmc_host_context* _context, const evmc_address*, size_t, uint8_t* _bufferData,
+    size_t _bufferSize)
 {
     auto& hostContext = static_cast<HostContext&>(*_context);
-    auto addr = fromEvmC(*_addr);
-    auto code = hostContext.codeAt(addr);
 
-    // Handle "big offset" edge case.
-    if (_codeOffset >= code->size())
-        return 0;
+    hostContext.setCode(bytes((bcos::byte*)_bufferData, (bcos::byte*)_bufferData + _bufferSize));
+    return _bufferSize;
+    // auto addr = fromEvmC(*_addr);
+    //   auto code = hostContext.codeAt(addr);
 
-    size_t maxToCopy = code->size() - _codeOffset;
-    size_t numToCopy = std::min(maxToCopy, _bufferSize);
-    std::copy_n(code->data() + _codeOffset, numToCopy, _bufferData);
-    return numToCopy;
+    //   // Handle "big offset" edge case.
+    //   if (_codeOffset >= code->size())
+    //     return 0;
+
+    //   size_t maxToCopy = code->size() - _codeOffset;
+    //   size_t numToCopy = std::min(maxToCopy, _bufferSize);
+    //   std::copy_n(code->data() + _codeOffset, numToCopy, _bufferData);
+    //   return numToCopy;
 }
 
-void selfdestruct(evmc_host_context* _context, const evmc_address* _addr,
-    const evmc_address* _beneficiary) noexcept
+void selfdestruct(evmc_host_context*, const evmc_address*, const evmc_address*) noexcept
 {
-    (void)_addr;
-    auto& hostContext = static_cast<HostContext&>(*_context);
-    assert(fromEvmC(*_addr) == hostContext.myAddress());
-    hostContext.suicide(fromEvmC(*_beneficiary));
+    //   (void)_addr;
+    //   auto &hostContext = static_cast<HostContext &>(*_context);
+    //   assert(fromEvmC(*_addr) == hostContext.myAddress());
+    //   hostContext.suicide(fromEvmC(*_beneficiary));
 }
-
 
 void log(evmc_host_context* _context, const evmc_address* _addr, uint8_t const* _data,
     size_t _dataSize, const evmc_bytes32 _topics[], size_t _numTopics) noexcept
 {
     (void)_addr;
     auto& hostContext = static_cast<HostContext&>(*_context);
-    assert(fromEvmC(*_addr) == hostContext.myAddress());
+    assert(fromEvmC(*_addr) == boost::algorithm::unhex(std::string(hostContext.myAddress())));
     h256 const* pTopics = reinterpret_cast<h256 const*>(_topics);
     hostContext.log(h256s{pTopics, pTopics + _numTopics}, bytesConstRef{_data, _dataSize});
 }
@@ -165,29 +203,33 @@ evmc_tx_context getTxContext(evmc_host_context* _context) noexcept
 
 evmc_bytes32 getBlockHash(evmc_host_context* _txContextPtr, int64_t _number)
 {
+    (void)_number;
+
     auto& hostContext = static_cast<HostContext&>(*_txContextPtr);
-    return toEvmC(hostContext.blockHash(_number));
+    // return toEvmC(hostContext.blockHash(_number));
+    return toEvmC(hostContext.blockHash());
 }
 
-evmc_result create(HostContext& _txContext, evmc_message const* _msg) noexcept
-{
-    int64_t gas = _msg->gas;
-    // u256 value = fromEvmC(_msg->value);
-    bytesConstRef init = {_msg->input_data, _msg->input_size};
-    u256 salt = fromEvmC(_msg->create2_salt);
-    evmc_opcode opcode =
-        _msg->kind == EVMC_CREATE ? evmc_opcode::OP_CREATE : evmc_opcode::OP_CREATE2;
+// evmc_result create(HostContext& _txContext, evmc_message const* _msg) noexcept
+// {
+//     return _txContext.externalRequest(_msg);
+// int64_t gas = _msg->gas;
+// // u256 value = fromEvmC(_msg->value);
+// bytesConstRef init = {_msg->input_data, _msg->input_size};
+// u256 salt = fromEvmC(_msg->create2_salt);
+// evmc_opcode opcode =
+//     _msg->kind == EVMC_CREATE ? evmc_opcode::OP_CREATE : evmc_opcode::OP_CREATE2;
 
-    // HostContext::create takes the sender address from .myAddress().
-    assert(fromEvmC(_msg->sender) == _txContext.myAddress());
+// // HostContext::create takes the sender address from .myAddress().
+// assert(fromEvmC(_msg->sender) == _txContext.myAddress());
 
-    return _txContext.create(gas, init, opcode, salt);
-}
+// return _txContext.create(gas, init, opcode, salt);
+// }
 
 evmc_result call(evmc_host_context* _context, const evmc_message* _msg) noexcept
 {
-    // gas maybe smaller than 0 since outside gas is u256 and evmc_message is int64_t
-    // so gas maybe smaller than 0 in some extreme cases
+    // gas maybe smaller than 0 since outside gas is u256 and evmc_message is
+    // int64_t so gas maybe smaller than 0 in some extreme cases
     // * origin code: assert(_msg->gas >= 0)
     if (_msg->gas < 0)
     {
@@ -197,33 +239,11 @@ evmc_result call(evmc_host_context* _context, const evmc_message* _msg) noexcept
 
     auto& hostContext = static_cast<HostContext&>(*_context);
 
-    // Handle CREATE separately.
-    if (_msg->kind == EVMC_CREATE || _msg->kind == EVMC_CREATE2)
-        return create(hostContext, _msg);
-
-    CallParameters params;
-    params.gas = _msg->gas;
-    // params.apparentValue = fromEvmC(_msg->value);
-    // params.valueTransfer = _msg->kind == EVMC_DELEGATECALL ? 0 : params.apparentValue;
-    if (hostContext.getBlockContext()->isWasm())
-    {
-        params.senderAddress = string((char*)_msg->sender_ptr, _msg->sender_len);
-        params.codeAddress = string((char*)_msg->destination_ptr, _msg->destination_len);
-    }
-    else
-    {
-        params.senderAddress = fromEvmC(_msg->sender);
-        params.codeAddress = fromEvmC(_msg->destination);
-    }
-    params.receiveAddress = _msg->kind == EVMC_CALL ? params.codeAddress : hostContext.myAddress();
-
-    params.data = {_msg->input_data, _msg->input_size};
-    params.staticCall = (_msg->flags & EVMC_STATIC) != 0;
-
-    return hostContext.call(params);
+    return hostContext.externalRequest(_msg);
 }
 
 /// function table
+// clang-format off
 evmc_host_interface const fnTable = {
     accountExists,
     getStorage,
@@ -238,6 +258,7 @@ evmc_host_interface const fnTable = {
     getBlockHash,
     log,
 };
+// clang-format on
 
 // for wasm
 
@@ -268,10 +289,11 @@ evmc_storage_status set(evmc_host_context* _context, const uint8_t* _addr, int32
     const uint8_t* _key, int32_t _keyLength, const uint8_t* _value, int32_t _valueLength)
 {
     auto& hostContext = static_cast<HostContext&>(*_context);
-    if (!hostContext.isPermitted())
-    {  // FIXME: return status instead of throw exception
-        BOOST_THROW_EXCEPTION(PermissionDenied());
-    }
+
+    // IF (!HOSTCONTEXT.ISPERMITTED())
+    // {  // FIXME: RETURN STATUS INSTEAD OF THROW EXCEPTION
+    //     BOOST_THROW_EXCEPTION(PERMISSIONDENIED());
+    // }
     assert(string_view((char*)_addr, _addressLength) == hostContext.myAddress());
     string key((char*)_key, _keyLength);
     string value((char*)_value, _valueLength);
@@ -305,20 +327,26 @@ evmc_bytes32 wasmGetCodeHash(
     return toEvmC(hostContext.codeHashAt(string_view((char*)_addr, _addressLength)));
 }
 
-size_t wasmCopyCode(evmc_host_context* _context, const uint8_t* _addr, int32_t _addressLength,
-    size_t _codeOffset, uint8_t* _bufferData, size_t _bufferSize)
+size_t wasmCopyCode(evmc_host_context* _context, const uint8_t*, int32_t, size_t,
+    uint8_t* _bufferData, size_t _bufferSize)
 {
     auto& hostContext = static_cast<HostContext&>(*_context);
-    auto code = hostContext.codeAt(string_view((char*)_addr, _addressLength));
 
-    // Handle "big offset" edge case.
-    if (_codeOffset >= code->size())
-        return 0;
+    hostContext.setCode(bytes((bcos::byte*)_bufferData, (bcos::byte*)_bufferData + _bufferSize));
+    return _bufferSize;
 
-    size_t maxToCopy = code->size() - _codeOffset;
-    size_t numToCopy = std::min(maxToCopy, _bufferSize);
-    std::copy_n(code->data() + _codeOffset, numToCopy, _bufferData);
-    return numToCopy;
+    //   hostContext.setCode(bcos::bytes(_bufferData, _bufferSize));
+
+    // auto code = hostContext.codeAt(string_view((char *)_addr, _addressLength));
+
+    // // Handle "big offset" edge case.
+    // if (_codeOffset >= code->size())
+    //   return 0;
+
+    // size_t maxToCopy = code->size() - _codeOffset;
+    // size_t numToCopy = std::min(maxToCopy, _bufferSize);
+    // std::copy_n(code->data() + _codeOffset, numToCopy, _bufferData);
+    // return numToCopy;
 }
 
 void wasmLog(evmc_host_context* _context, const uint8_t* _addr, int32_t _addressLength,

@@ -25,6 +25,7 @@
 #include "bcos-framework/libprotocol/LogEntry.h"
 #include "bcos-framework/libprotocol/TransactionStatus.h"
 #include "bcos-framework/libutilities/Exceptions.h"
+#include "interfaces/executor/ExecutionResult.h"
 #include <evmc/instructions.h>
 #include <functional>
 #include <set>
@@ -38,7 +39,18 @@ DERIVE_BCOS_EXCEPTION(InvalidEncoding);
 
 namespace executor
 {
+const char STORAGE_VALUE[] = "value";
+const char ACCOUNT_CODE_HASH[] = "codeHash";
+const char ACCOUNT_CODE[] = "code";
+// const char ACCOUNT_BALANCE[] = "balance";
+// const char ACCOUNT_ABI[] = "abi";
+// const char ACCOUNT_NONCE[] = "nonce";
+// const char ACCOUNT_ALIVE[] = "alive";
+// const char ACCOUNT_AUTHORITY[] = "authority";
+// const char ACCOUNT_FROZEN[] = "frozen";
+
 #define EXECUTIVE_LOG(LEVEL) BCOS_LOG(LEVEL) << "[EXECUTOR]"
+
 struct SubState
 {
     std::set<std::string> suicides;  ///< Any accounts that have suicided.
@@ -69,23 +81,55 @@ struct SubState
 /// set parameters and functions for the evm call
 struct CallParameters
 {
-    CallParameters() = default;
-    CallParameters(std::string_view _senderAddress, std::string_view _codeAddress,
-        std::string_view _receiveAddress, int64_t _gas, bytesConstRef _data, bool _staticCall)
-      : senderAddress(_senderAddress),
-        codeAddress(_codeAddress),
-        receiveAddress(_receiveAddress),
-        gas(_gas),
-        data(_data),
-        staticCall(_staticCall)
-    {}
-    std::string senderAddress;   /// address of the transaction sender
-    std::string codeAddress;     /// address of the contract
-    std::string receiveAddress;  /// address of the transaction receiver
-    int64_t gas;
-    bytesConstRef data;       /// transaction data
-    bool staticCall = false;  /// only true when the transaction is a message call
+    using Ptr = std::shared_ptr<CallParameters>;
+    using ConstPtr = std::shared_ptr<const CallParameters>;
+
+    enum Type
+    {
+        MESSAGE = 0,
+        FINISHED = 1,
+    };
+
+    Type type;
+    std::string senderAddress;   // by request or response
+    std::string codeAddress;     // by request or response
+    std::string receiveAddress;  // by request or response
+    std::string origin;          // by request or response
+
+    int64_t gas = 0;          // by request or response
+    bytes data;               // by request or response, transaction data
+    bool staticCall = false;  // by request or response
+    bool create = false;      // by request, is create?
+
+
+    int status;                                        // by response
+    std::string message;                               // by response
+    std::vector<bcos::protocol::LogEntry> logEntries;  // by response
+    std::optional<u256> createSalt;                    // by response
+    std::string newEVMContractAddress;                 // by response
 };
+
+inline bcos::protocol::ExecutionResult::Ptr toExecutionResult(
+    bcos::protocol::ExecutionResultFactory::Ptr factory, CallParameters::Ptr&& callResults)
+{
+    auto executionResult = factory->createExecutionResult();
+
+    executionResult->setStatus(callResults->status);
+    executionResult->setMessage(std::move(callResults->message));
+    // executionResult->setStaticCall(callResults->status)
+    if (callResults->createSalt)
+    {
+        executionResult->setCreateSalt(std::move(*callResults->createSalt));
+    }
+    executionResult->setGasAvailable(callResults->gas);
+    executionResult->setLogEntries(std::make_shared<std::vector<bcos::protocol::LogEntry>>(
+        std::move(callResults->logEntries)));
+    executionResult->setOutput(std::move(callResults->data));
+    executionResult->setTo(std::move(callResults->receiveAddress));
+    executionResult->setNewEVMContractAddress(std::move(callResults->newEVMContractAddress));
+
+    return executionResult;
+}
 
 struct EVMSchedule
 {
@@ -168,7 +212,8 @@ struct EVMSchedule
 static const EVMSchedule FrontierSchedule = EVMSchedule(false, false, 21000);
 /// value of params are equal to HomesteadSchedule
 static const EVMSchedule HomesteadSchedule = EVMSchedule(true, true, 53000);
-/// EIP150(refer to: https://github.com/ethereum/EIPs/blob/master/EIPS/eip-150.md)
+/// EIP150(refer to:
+/// https://github.com/ethereum/EIPs/blob/master/EIPS/eip-150.md)
 static const EVMSchedule EIP150Schedule = [] {
     EVMSchedule schedule = HomesteadSchedule;
     schedule.eip150Mode = true;
@@ -197,7 +242,6 @@ static const EVMSchedule ByzantiumSchedule = [] {
     // schedule.blockRewardOverwrite = {3 * ether};
     return schedule;
 }();
-
 
 static const EVMSchedule ConstantinopleSchedule = [] {
     EVMSchedule schedule = ByzantiumSchedule;
@@ -228,7 +272,8 @@ static const EVMSchedule FiscoBcosScheduleV3 = [] {
 static const EVMSchedule EWASMSchedule = [] {
     EVMSchedule schedule = FiscoBcosScheduleV3;
     schedule.maxCodeSize = std::numeric_limits<unsigned>::max();
-    // Ensure that zero bytes are not subsidised and are charged the same as non-zero bytes.
+    // Ensure that zero bytes are not subsidised and are charged the same as
+    // non-zero bytes.
     schedule.txDataZeroGas = schedule.txDataNonZeroGas;
     return schedule;
 }();
@@ -261,6 +306,7 @@ protocol::TransactionStatus toTransactionStatus(Exception const& _e);
 
 }  // namespace executor
 
+bool hasWasmPreamble(const bytesConstRef& _input);
 bool hasWasmPreamble(const bytes& _input);
 
 /**

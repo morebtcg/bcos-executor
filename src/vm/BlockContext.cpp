@@ -20,7 +20,6 @@
  */
 
 #include "BlockContext.h"
-#include "../state/State.h"
 #include "Precompiled.h"
 #include "TransactionExecutive.h"
 #include "bcos-framework/interfaces/executor/ExecutionResult.h"
@@ -28,34 +27,33 @@
 #include "bcos-framework/interfaces/storage/StorageInterface.h"
 #include "bcos-framework/interfaces/storage/Table.h"
 #include "bcos-framework/libcodec/abi/ContractABICodec.h"
+#include "bcos-framework/libutilities/Error.h"
+#include <boost/lexical_cast.hpp>
+#include <boost/throw_exception.hpp>
+#include <string>
 
 using namespace bcos::executor;
 using namespace bcos::protocol;
 using namespace bcos::precompiled;
 using namespace std;
 
-namespace bcos
-{
-BlockContext::BlockContext(std::shared_ptr<storage::StateStorage> _tableFactory,
-    crypto::Hash::Ptr _hashImpl, const protocol::BlockHeader::ConstPtr& _current,
+BlockContext::BlockContext(std::shared_ptr<storage::StateStorage> storage,
+    crypto::Hash::Ptr _hashImpl, protocol::BlockHeader::ConstPtr _current,
     protocol::ExecutionResultFactory::Ptr _executionResultFactory, const EVMSchedule& _schedule,
-    CallBackFunction _callback, bool _isWasm)
+    bool _isWasm)
   : m_addressCount(0x10000),
-    m_currentHeader(_current),
-    m_executionResultFactory(_executionResultFactory),
-    m_numberHash(_callback),
+    m_currentHeader(std::move(_current)),
+    m_executionResultFactory(std::move(_executionResultFactory)),
     m_schedule(_schedule),
     m_isWasm(_isWasm),
-    m_tableFactory(_tableFactory),
+    m_storage(std::move(storage)),
     m_hashImpl(_hashImpl)
 {
-    // FIXME: fix State
-    // m_state = make_shared<State>(m_tableFactory, m_hashImpl, _isWasm);
-    m_parallelConfigCache = make_shared<ParallelConfigCache>();
+    // m_parallelConfigCache = make_shared<ParallelConfigCache>();
 }
 
 shared_ptr<PrecompiledExecResult> BlockContext::call(const string& address, bytesConstRef param,
-    const string& origin, const string& sender, u256& _remainGas)
+    const string& origin, const string& sender, int64_t& _remainGas)
 {
     try
     {
@@ -103,8 +101,7 @@ bool BlockContext::isPrecompiled(const std::string& address) const
     return (m_address2Precompiled.count(address));
 }
 
-std::shared_ptr<precompiled::Precompiled> BlockContext::getPrecompiled(
-    const std::string& address) const
+std::shared_ptr<Precompiled> BlockContext::getPrecompiled(const std::string& address) const
 {
     auto itPrecompiled = m_address2Precompiled.find(address);
 
@@ -115,31 +112,26 @@ std::shared_ptr<precompiled::Precompiled> BlockContext::getPrecompiled(
     return std::shared_ptr<precompiled::Precompiled>();
 }
 
-std::shared_ptr<executor::StateInterface> BlockContext::getState()
-{
-    return m_state;
-}
-
 bool BlockContext::isEthereumPrecompiled(const string& _a) const
 {
-    return m_precompiledContract.count(_a);
+    return m_precompiledContract->find(_a) != m_precompiledContract->end();
 }
 
-std::pair<bool, bytes> BlockContext::executeOriginPrecompiled(
+std::pair<bool, bcos::bytes> BlockContext::executeOriginPrecompiled(
     const string& _a, bytesConstRef _in) const
 {
-    return m_precompiledContract.at(_a)->execute(_in);
+    return m_precompiledContract->at(_a)->execute(_in);
 }
 
-bigint BlockContext::costOfPrecompiled(const string& _a, bytesConstRef _in) const
+int64_t BlockContext::costOfPrecompiled(const string& _a, bytesConstRef _in) const
 {
-    return m_precompiledContract.at(_a)->cost(_in);
+    return m_precompiledContract->at(_a)->cost(_in).convert_to<int64_t>();
 }
 
 void BlockContext::setPrecompiledContract(
-    std::map<std::string, PrecompiledContract::Ptr> const& precompiledContract)
+    std::shared_ptr<const std::map<std::string, PrecompiledContract::Ptr>> precompiledContract)
 {
-    m_precompiledContract = precompiledContract;
+    m_precompiledContract = std::move(precompiledContract);
 }
 void BlockContext::setAddress2Precompiled(
     const string& address, std::shared_ptr<precompiled::Precompiled> precompiled)
@@ -147,48 +139,38 @@ void BlockContext::setAddress2Precompiled(
     m_address2Precompiled.insert(std::make_pair(address, precompiled));
 }
 
-void BlockContext::commit()
+std::tuple<std::shared_ptr<TransactionExecutive>,
+    std::function<void(bcos::Error::Ptr&&, bcos::protocol::ExecutionResult::Ptr&&)>>&
+BlockContext::insertExecutive(int64_t contextID, std::string_view contract,
+    std::tuple<std::shared_ptr<TransactionExecutive>,
+        std::function<void(bcos::Error::Ptr&&, bcos::protocol::ExecutionResult::Ptr&&)>>
+        item)
 {
-    m_state->commit();
-}
-
-void BlockContext::insertExecutive(
-    int64_t contextID, std::string_view address, TransactionExecutive::Ptr executive)
-{
-    if (!m_executives.count(contextID))
+    auto it = m_executives.find(std::tuple{contextID, contract});
+    if (it != m_executives.end())
     {
-        m_executives.insert(
-            {contextID, std::map<std::string, std::stack<TransactionExecutive::Ptr>>()});
+        BOOST_THROW_EXCEPTION(
+            BCOS_ERROR(-1, "Executive exists: " + boost::lexical_cast<std::string>(contextID)));
     }
-    auto executives = m_executives[contextID][string(address)];
-    while (!executives.empty() && executives.top()->isFinished())
-    {  // remove executive from m_executives
-        executives.pop();
-    }
-    executives.push(move(executive));
+
+    bool success;
+    std::tie(it, success) = m_executives.emplace(std::tuple{contextID, contract}, std::move(item));
+
+    return it->second;
 }
 
-TransactionExecutive::Ptr BlockContext::getLastExecutiveOf(
-    int64_t contextID, std::string_view address)
+std::tuple<std::shared_ptr<TransactionExecutive>,
+    std::function<void(bcos::Error::Ptr&&, bcos::protocol::ExecutionResult::Ptr&&)>>&
+BlockContext::getExecutive(int64_t contextID, std::string_view contract)
 {
-    auto& executives = m_executives[contextID][string(address)];
-    while (!executives.empty() && executives.top()->isFinished())
-    {  // remove executive from m_executives
-        executives.pop();
+    auto it = m_executives.find({contextID, contract});
+    if (it == m_executives.end())
+    {
+        BOOST_THROW_EXCEPTION(
+            BCOS_ERROR(-1, "Can't find executive: " + boost::lexical_cast<std::string>(contextID)));
     }
-    return executives.top();
-}
 
-ExecutionResult::Ptr BlockContext::createExecutionResult(int64_t _contextID, CallParameters& _p)
-{
-    auto result = m_executionResultFactory->createExecutionResult();
-    result->setType(protocol::ExecutionResult::EXTERNAL_CALL);
-    result->setContextID(_contextID);
-    result->setOutput(_p.data.toBytes());
-    result->setTo(_p.codeAddress);
-    result->setGasAvailable(_p.gas);
-    result->setStaticCall(_p.staticCall);
-    return result;
+    return it->second;
 }
 
 ExecutionResult::Ptr BlockContext::createExecutionResult(
@@ -206,5 +188,3 @@ ExecutionResult::Ptr BlockContext::createExecutionResult(
     result->setStaticCall(false);
     return result;
 }
-
-}  // namespace bcos
