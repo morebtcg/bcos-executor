@@ -21,20 +21,17 @@
 
 #pragma once
 
-#include "Common.h"
-#include "bcos-framework/interfaces/executor/ExecutionResult.h"
+#include "../Common.h"
+#include "bcos-framework/interfaces/executor/ExecutionMessage.h"
 #include "bcos-framework/interfaces/protocol/Block.h"
 #include "bcos-framework/interfaces/protocol/Transaction.h"
 #include "bcos-framework/interfaces/storage/Table.h"
 #include "bcos-framework/libstorage/StateStorage.h"
+#include <tbb/concurrent_unordered_map.h>
 #include <atomic>
 #include <functional>
 #include <memory>
 #include <stack>
-
-#define TBB_PREVIEW_CONCURRENT_ORDERED_CONTAINERS 1
-#include <tbb/concurrent_map.h>
-#include <tbb/concurrent_unordered_map.h>
 
 namespace bcos
 {
@@ -55,13 +52,13 @@ class BlockContext : public std::enable_shared_from_this<BlockContext>
 {
 public:
     typedef std::shared_ptr<BlockContext> Ptr;
-    using ParallelConfigCache = tbb::concurrent_map<std::pair<std::string, uint32_t>,
-        std::shared_ptr<bcos::precompiled::ParallelConfig>>;
+    // using ParallelConfigCache = tbb::concurrent_map<std::pair<std::string, uint32_t>,
+    //     std::shared_ptr<bcos::precompiled::ParallelConfig>>;
 
     BlockContext(std::shared_ptr<storage::StateStorage> storage, crypto::Hash::Ptr _hashImpl,
         protocol::BlockHeader::ConstPtr _current,
-        protocol::ExecutionResultFactory::Ptr _executionResultFactory, const EVMSchedule& _schedule,
-        bool _isWasm);
+        protocol::ExecutionMessageFactory::Ptr _executionResultFactory,
+        const EVMSchedule& _schedule, bool _isWasm);
 
     using getTxCriticalsHandler = std::function<std::shared_ptr<std::vector<std::string>>(
         const protocol::Transaction::ConstPtr& _tx)>;
@@ -126,18 +123,17 @@ public:
     protocol::BlockHeader::ConstPtr currentBlockHeader() { return m_currentHeader; }
 
     EVMSchedule const& evmSchedule() const { return m_schedule; }
-    std::tuple<std::shared_ptr<TransactionExecutive>,
-        std::function<void(bcos::Error::Ptr&&, bcos::protocol::ExecutionResult::Ptr&&)>>&
-    insertExecutive(int64_t contextID, std::string_view contract,
-        std::tuple<std::shared_ptr<TransactionExecutive>,
-            std::function<void(bcos::Error::Ptr&&, bcos::protocol::ExecutionResult::Ptr&&)>>
-            item);
-    std::tuple<std::shared_ptr<TransactionExecutive>,
-        std::function<void(bcos::Error::Ptr&&, bcos::protocol::ExecutionResult::Ptr&&)>>&
-    getExecutive(int64_t contextID, std::string_view contract);
 
-    protocol::ExecutionResult::Ptr createExecutionResult(
-        int64_t _contextID, int64_t _gasLeft, bytesConstRef _code, std::optional<u256> _salt);
+    void insertExecutive(int64_t contextID, int64_t seq,
+        std::tuple<std::shared_ptr<TransactionExecutive>,
+            std::function<void(
+                bcos::Error::UniquePtr&&, bcos::protocol::ExecutionMessage::UniquePtr&&)>>
+            item);
+
+    std::tuple<std::shared_ptr<TransactionExecutive>,
+        std::function<void(
+            bcos::Error::UniquePtr&&, bcos::protocol::ExecutionMessage::UniquePtr&&)>>*
+    getExecutive(int64_t contextID, int64_t seq);
 
     void clear() { m_executives.clear(); }
 
@@ -149,28 +145,28 @@ private:
 
     struct HashCombine
     {
-        size_t operator()(const std::tuple<int64_t, std::string_view>& val) const
+        size_t operator()(const std::tuple<int64_t, int64_t>& val) const
         {
             size_t seed = hashInt64(std::get<0>(val));
-            boost::hash_combine(seed, hashString(std::get<1>(val)));
+            boost::hash_combine(seed, hashInt64(std::get<1>(val)));
 
             return seed;
         }
 
         std::hash<int64_t> hashInt64;
-        std::hash<std::string_view> hashString;
     };
 
     // only one request access the m_executives' value one time
-    tbb::concurrent_unordered_map<std::tuple<int64_t, std::string_view>,
+    tbb::concurrent_unordered_map<std::tuple<int64_t, int64_t>,
         std::tuple<std::shared_ptr<TransactionExecutive>,
-            std::function<void(bcos::Error::Ptr&&, bcos::protocol::ExecutionResult::Ptr&&)>>,
+            std::function<void(
+                bcos::Error::UniquePtr&&, bcos::protocol::ExecutionMessage::UniquePtr&&)>>,
         HashCombine>
         m_executives;
 
     std::atomic<int> m_addressCount;
     protocol::BlockHeader::ConstPtr m_currentHeader;
-    protocol::ExecutionResultFactory::Ptr m_executionResultFactory;
+    protocol::ExecutionMessageFactory::Ptr m_executionMessageFactory;
     CallBackFunction m_numberHash;
     EVMSchedule m_schedule;
     u256 m_gasLimit;

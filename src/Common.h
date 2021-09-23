@@ -21,11 +21,12 @@
 
 #pragma once
 
+#include "CallParameters.h"
+#include "bcos-framework/interfaces/executor/ExecutionMessage.h"
 #include "bcos-framework/interfaces/protocol/BlockHeader.h"
 #include "bcos-framework/libprotocol/LogEntry.h"
 #include "bcos-framework/libprotocol/TransactionStatus.h"
 #include "bcos-framework/libutilities/Exceptions.h"
-#include "interfaces/executor/ExecutionResult.h"
 #include <evmc/instructions.h>
 #include <functional>
 #include <set>
@@ -39,9 +40,14 @@ DERIVE_BCOS_EXCEPTION(InvalidEncoding);
 
 namespace executor
 {
+#define EXECUTOR_LOG(LEVEL) BCOS_LOG(LEVEL) << LOG_BADGE("EXECUTOR")
+#define PARA_LOG(LEVEL) BCOS_LOG(LEVEL) << LOG_BADGE("PARA") << LOG_BADGE(utcTime())
+
+
 const char STORAGE_VALUE[] = "value";
 const char ACCOUNT_CODE_HASH[] = "codeHash";
 const char ACCOUNT_CODE[] = "code";
+
 // const char ACCOUNT_BALANCE[] = "balance";
 // const char ACCOUNT_ABI[] = "abi";
 // const char ACCOUNT_NONCE[] = "nonce";
@@ -50,6 +56,11 @@ const char ACCOUNT_CODE[] = "code";
 // const char ACCOUNT_FROZEN[] = "frozen";
 
 #define EXECUTIVE_LOG(LEVEL) BCOS_LOG(LEVEL) << "[EXECUTOR]"
+
+struct GlobalHashImpl
+{
+    static crypto::Hash::Ptr g_hashImpl;
+};
 
 struct SubState
 {
@@ -78,41 +89,10 @@ struct SubState
  *
  */
 
-/// set parameters and functions for the evm call
-struct CallParameters
+inline bcos::protocol::ExecutionMessage::UniquePtr toExecutionResult(
+    bcos::protocol::ExecutionMessageFactory& factory, CallParameters::UniquePtr callResults)
 {
-    using Ptr = std::shared_ptr<CallParameters>;
-    using ConstPtr = std::shared_ptr<const CallParameters>;
-
-    enum Type
-    {
-        MESSAGE = 0,
-        FINISHED = 1,
-    };
-
-    Type type;
-    std::string senderAddress;   // by request or response
-    std::string codeAddress;     // by request or response
-    std::string receiveAddress;  // by request or response
-    std::string origin;          // by request or response
-
-    int64_t gas = 0;          // by request or response
-    bytes data;               // by request or response, transaction data
-    bool staticCall = false;  // by request or response
-    bool create = false;      // by request, is create?
-
-
-    int status;                                        // by response
-    std::string message;                               // by response
-    std::vector<bcos::protocol::LogEntry> logEntries;  // by response
-    std::optional<u256> createSalt;                    // by response
-    std::string newEVMContractAddress;                 // by response
-};
-
-inline bcos::protocol::ExecutionResult::Ptr toExecutionResult(
-    bcos::protocol::ExecutionResultFactory::Ptr factory, CallParameters::Ptr&& callResults)
-{
-    auto executionResult = factory->createExecutionResult();
+    auto executionResult = factory.createExecutionMessage();
 
     executionResult->setStatus(callResults->status);
     executionResult->setMessage(std::move(callResults->message));
@@ -122,9 +102,8 @@ inline bcos::protocol::ExecutionResult::Ptr toExecutionResult(
         executionResult->setCreateSalt(std::move(*callResults->createSalt));
     }
     executionResult->setGasAvailable(callResults->gas);
-    executionResult->setLogEntries(std::make_shared<std::vector<bcos::protocol::LogEntry>>(
-        std::move(callResults->logEntries)));
-    executionResult->setOutput(std::move(callResults->data));
+    executionResult->setLogEntries(std::move(callResults->logEntries));
+    executionResult->setData(std::move(callResults->data));
     executionResult->setTo(std::move(callResults->receiveAddress));
     executionResult->setNewEVMContractAddress(std::move(callResults->newEVMContractAddress));
 

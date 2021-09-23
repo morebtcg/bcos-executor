@@ -1,9 +1,9 @@
 #pragma once
 
-#include "../../src/executor/Common.h"
-#include "vm/Common.h"
+#include "../../src/Common.h"
 #include <bcos-framework/interfaces/storage/StorageInterface.h>
 #include <bcos-framework/libstorage/StateStorage.h>
+#include <boost/algorithm/hex.hpp>
 #include <boost/test/unit_test.hpp>
 #include <memory>
 
@@ -14,7 +14,7 @@ class MockTransactionalStorage : public bcos::storage::TransactionalStorageInter
 public:
     MockTransactionalStorage(bcos::crypto::Hash::Ptr hashImpl) : m_hashImpl(std::move(hashImpl))
     {
-        m_inner = std::make_shared<bcos::storage::StateStorage>(nullptr, m_hashImpl, 0);
+        m_inner = std::make_shared<bcos::storage::StateStorage>(nullptr, m_hashImpl);
     }
 
     void asyncGetPrimaryKeys(const std::string_view& table,
@@ -42,8 +42,7 @@ public:
     }
 
     void asyncSetRow(const std::string_view& table, const std::string_view& key,
-        storage::Entry entry,
-        std::function<void(Error::UniquePtr&&, bool)> callback) noexcept override
+        storage::Entry entry, std::function<void(Error::UniquePtr&&)> callback) noexcept override
     {
         m_inner->asyncSetRow(table, key, std::move(entry), std::move(callback));
     }
@@ -68,8 +67,10 @@ public:
                 std::string fields;
                 for (auto it : entry)
                 {
-                    fields.append(it).append(",");
+                    fields.append(boost::algorithm::hex_lower(std::string(it))).append(",");
                 }
+
+                auto keyHex = boost::algorithm::hex_lower(std::string(key));
                 EXECUTOR_LOG(TRACE) << "Merge data" << LOG_KV("table", table) << LOG_KV("key", key)
                                     << LOG_KV("fields", fields);
 

@@ -21,13 +21,15 @@
 
 #pragma once
 
-#include "Common.h"
-#include "TransactionExecutive.h"
+#include "../Common.h"
+#include "bcos-framework/interfaces/storage/Table.h"
+#include "interfaces/protocol/BlockHeader.h"
 #include <evmc/evmc.h>
 #include <evmc/helpers.h>
 #include <evmc/instructions.h>
 #include <functional>
 #include <map>
+#include <memory>
 
 namespace bcos
 {
@@ -36,9 +38,14 @@ namespace executor
 class HostContext : public evmc_host_context
 {
 public:
+    using UniquePtr = std::unique_ptr<HostContext>;
+    using UniqueConstPtr = std::unique_ptr<const HostContext>;
+
     /// Full constructor.
-    HostContext(std::weak_ptr<TransactionExecutive> executive,
-        CallParameters::ConstPtr callParameters, bcos::storage::Table table);
+    HostContext(CallParameters::UniquePtr callParameters, bcos::storage::Table table,
+        std::string contractAddress,
+        std::function<CallParameters::UniquePtr(CallParameters::UniquePtr)> externalRequest,
+        protocol::BlockHeader::ConstPtr blockHeader, bool isWasm);
     ~HostContext() = default;
 
     HostContext(HostContext const&) = delete;
@@ -89,35 +96,30 @@ public:
     void suicide();
 
     /// Return the EVM gas-price schedule for this execution context.
-    EVMSchedule const& evmSchedule() const
-    {
-        return m_executive.lock()->blockContext()->evmSchedule();
-    }
+    EVMSchedule const& evmSchedule() const { return m_evmSchedule; }
 
     /// Hash of a block if within the last 256 blocks, or h256() otherwise.
-    h256 blockHash();
+    h256 blockHash() const { return m_blockHeader->hash(); }
+    int64_t blockNumber() const { return m_blockHeader->number(); }
+    int64_t timestamp() const
+    {
+        return std::const_pointer_cast<protocol::BlockHeader>(m_blockHeader)
+            ->timestamp();  // TODO: set blockHeader timestamp() to const
+    }
+    int64_t blockGasLimit() const
+    {
+        return 30000000;  // TODO: add config
+    }
 
     bool isPermitted();
-
-    /// Get the execution environment information.
-    std::shared_ptr<BlockContext> getBlockContext() const
-    {
-        return m_executive.lock()->blockContext();
-    }
 
     /// Revert any changes made (by any of the other calls).
     void log(h256s&& _topics, bytesConstRef _data);
 
     void suicide(const std::string_view& _a);
 
-    std::string_view newContractAddress() const { return m_newContractAddress; }
-    void setNewContractAddress(std::string newContractAddress)
-    {
-        m_newContractAddress = std::move(newContractAddress);
-    }
-
     /// ------ get interfaces related to HostContext------
-    std::string_view myAddress() const { return m_executive.lock()->contractAddress(); }
+    std::string_view myAddress() const { return m_contractAddress; }
     std::string_view caller() const { return m_callParameters->senderAddress; }
     std::string_view origin() const { return m_callParameters->origin; }
     std::string_view codeAddress() const { return m_callParameters->codeAddress; }
@@ -126,10 +128,11 @@ public:
     h256 codeHash();
     u256 salt() const { return m_salt; }
     SubState& sub() { return m_sub; }
-    unsigned depth() const { return m_depth; }
     bool isCreate() const { return m_callParameters->create; }
     bool staticCall() const { return m_callParameters->staticCall; }
     int64_t gas() const { return m_callParameters->gas; }
+
+    static crypto::Hash::Ptr hashImpl() { return GlobalHashImpl::g_hashImpl; }
 
 private:
     void depositFungibleAsset(
@@ -137,21 +140,20 @@ private:
     void depositNotFungibleAsset(const std::string_view& _to, const std::string& _assetName,
         uint64_t _assetID, const std::string& _uri);
 
-protected:
-    std::weak_ptr<TransactionExecutive> m_executive;
-
-private:
-    CallParameters::ConstPtr m_callParameters;
+    CallParameters::UniquePtr m_callParameters;
     bcos::storage::Table m_table;  ///< The table of contract
 
-    u256 m_salt;           ///< Values used in new address construction by CREATE2
-    SubState m_sub;        ///< Sub-band VM state (suicides, refund counter, logs).
-    unsigned m_depth = 0;  ///< Depth of the present call.
-    std::string m_newContractAddress;
+    u256 m_salt;     ///< Values used in new address construction by CREATE2
+    SubState m_sub;  ///< Sub-band VM state (suicides, refund counter, logs).
 
-    std::map<std::string, size_t, std::less<>> m_key2Version;  // the version cache
+    std::string m_contractAddress;
+    std::function<CallParameters::UniquePtr(CallParameters::UniquePtr)> m_externalRequest;
+    protocol::BlockHeader::ConstPtr m_blockHeader;
 
-    std::list<CallParameters::ConstPtr> m_responseStore;
+    std::list<CallParameters::UniquePtr> m_responseStore;
+    bool m_isWasm;
+
+    static EVMSchedule m_evmSchedule;
 };
 
 }  // namespace executor
