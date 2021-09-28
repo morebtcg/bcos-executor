@@ -139,13 +139,12 @@ void TransactionExecutor::nextBlockHeader(const bcos::protocol::BlockHeader::Con
         bcos::storage::StateStorage::Ptr stateStorage;
         if (m_stateStorages.empty())
         {
-            stateStorage =
-                std::make_shared<bcos::storage::StateStorage>(m_backendStorage, m_hashImpl);
+            stateStorage = std::make_shared<bcos::storage::StateStorage>(m_backendStorage);
         }
         else
         {
             auto prev = m_stateStorages.back();
-            stateStorage = std::make_shared<bcos::storage::StateStorage>(prev.storage, m_hashImpl);
+            stateStorage = std::make_shared<bcos::storage::StateStorage>(prev.storage);
         }
 
         m_blockContext = std::make_shared<BlockContext>(stateStorage, m_hashImpl, blockHeader,
@@ -1033,6 +1032,7 @@ std::string TransactionExecutor::newEVMAddress(
                          boost::lexical_cast<std::string>(contextID));
 
     std::string hexAddress;
+    hexAddress.reserve(40);
     boost::algorithm::hex(hash.data(), hash.data() + 20, std::back_inserter(hexAddress));
 
     toChecksumAddress(hexAddress, m_hashImpl);
@@ -1045,7 +1045,14 @@ std::string TransactionExecutor::newEVMAddress(
 {
     auto hash = m_hashImpl->hash(
         bytes{0xff} + toBytes(_sender) + toBigEndian(_salt) + m_hashImpl->hash(_init));
-    return string((char*)hash.data(), 20);
+
+    std::string hexAddress;
+    hexAddress.reserve(40);
+    boost::algorithm::hex(hash.data(), hash.data() + 20, std::back_inserter(hexAddress));
+
+    toChecksumAddress(hexAddress, m_hashImpl);
+
+    return hexAddress;
 }
 
 std::unique_ptr<CallParameters> TransactionExecutor::createCallParameters(
@@ -1071,8 +1078,7 @@ std::unique_ptr<CallParameters> TransactionExecutor::createCallParameters(
         contract = input.to();
     }
 
-    auto callParameters = std::make_unique<CallParameters>();
-    callParameters->type = CallParameters::MESSAGE;
+    auto callParameters = std::make_unique<CallParameters>(CallParameters::MESSAGE);
     callParameters->origin = input.origin();
     callParameters->senderAddress = input.from();
     callParameters->receiveAddress = contract;
@@ -1089,8 +1095,7 @@ std::unique_ptr<CallParameters> TransactionExecutor::createCallParameters(
     const bcos::protocol::ExecutionMessage& input, bcos::protocol::Transaction::Ptr&& tx,
     const BlockContext& blockContext)
 {
-    auto callParameters = std::make_unique<CallParameters>();
-    callParameters->type = CallParameters::MESSAGE;
+    auto callParameters = std::make_unique<CallParameters>(CallParameters::MESSAGE);
 
     bool create = false;
     if (m_isWasm)

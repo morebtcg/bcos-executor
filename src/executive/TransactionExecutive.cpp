@@ -27,6 +27,7 @@
 #include "../vm/VMFactory.h"
 #include "../vm/VMInstance.h"
 #include "BlockContext.h"
+#include "bcos-executor/TransactionExecutor.h"
 #include "bcos-framework/interfaces/protocol/Exceptions.h"
 #include "bcos-framework/interfaces/storage/Table.h"
 #include "bcos-framework/libcodec/abi/ContractABICodec.h"
@@ -49,80 +50,48 @@ using namespace bcos::codec;
 /// Error info for VMInstance status code.
 using errinfo_evmcStatusCode = boost::error_info<struct tag_evmcStatusCode, evmc_status_code>;
 
-namespace
+void TransactionExecutive::start(CallParameters::UniquePtr input)
 {
-// evmc_status_code transactionStatusToEvmcStatus(protocol::TransactionStatus ex) noexcept
-// {
-//     switch (ex)
-//     {
-//     case TransactionStatus::None:
-//         return EVMC_SUCCESS;
+    m_pushMessage = std::make_unique<Coroutine::push_type>([this](Coroutine::pull_type& source) {
+        auto blockContext = m_blockContext.lock();
+        if (!blockContext)
+        {
+            BOOST_THROW_EXCEPTION(BCOS_ERROR(-1, "blockContext is null"));
+        }
 
-//     case TransactionStatus::RevertInstruction:
-//         return EVMC_REVERT;
+        m_pullMessage = std::make_unique<Coroutine::pull_type>(std::move(source));
 
-//     case TransactionStatus::OutOfGas:
-//         return EVMC_OUT_OF_GAS;
+        m_storageWrapper = std::make_unique<CoroutineStorageWrapper<CoroutineMessage>>(
+            blockContext->storage(), *m_pushMessage, *m_pullMessage);
 
-//     case TransactionStatus::BadInstruction:
-//         return EVMC_UNDEFINED_INSTRUCTION;
+        auto callParameters = m_pullMessage->get();
 
-//     case TransactionStatus::OutOfStack:
-//         return EVMC_STACK_OVERFLOW;
+        auto response = execute(std::move(std::get<CallParameters::UniquePtr>(callParameters)));
 
-//     case TransactionStatus::StackUnderflow:
-//         return EVMC_STACK_UNDERFLOW;
+        m_externalCallCallback(shared_from_this(), std::move(response));
 
-//     case TransactionStatus::BadJumpDestination:
-//         return EVMC_BAD_JUMP_DESTINATION;
+        EXECUTOR_LOG(TRACE) << "end coroutine execution";
+    });
 
-//     default:
-//         return EVMC_FAILURE;
-//     }
-// }
-
-}  // namespace
-
-// int64_t TransactionExecutive::gasLeft() const
-// {
-//     return m_remainGas;
-// }
-
-// std::string TransactionExecutive::newAddress() const
-// {
-//     if (m_blockContext->isWasm() || m_newAddress.empty())
-//     {
-//         return m_newAddress;
-//     }
-//     auto hexAddress = toChecksumAddressFromBytes(m_newAddress, m_hashImpl);
-//     return hexAddress;
-// }
-
-void TransactionExecutive::start(CallParameters::UniquePtr callParameters)
-{
-    m_pushMessage = std::make_unique<Coroutine::push_type>(
-        Coroutine::push_type([this](Coroutine::pull_type& source) {
-            EXECUTOR_LOG(TRACE) << "start coroutine run";
-
-            m_pullMessage = std::make_unique<Coroutine::pull_type>(std::move(source));
-            auto callParameters = m_pullMessage->get();
-
-            auto response = execute(std::move(callParameters));
-
-            m_callback(shared_from_this(), std::move(response));
-
-            EXECUTOR_LOG(TRACE) << "execution finished";
-        }));
-
-    pushMessage(std::move(callParameters));
+    pushMessage(std::move(input));
 }
 
-CallParameters::UniquePtr TransactionExecutive::externalRequest(CallParameters::UniquePtr input)
+CallParameters::UniquePtr TransactionExecutive::externalCall(CallParameters::UniquePtr input)
 {
-    m_callback(shared_from_this(), std::move(input));
+    m_externalCallCallback(shared_from_this(), std::move(input));
     (*m_pullMessage)();  // move to the main coroutine
 
-    auto output = m_pullMessage->get();  // wait for main coroutine's response
+    auto output =
+        std::get<CallMessage>(m_pullMessage->get());  // Wait for main coroutine's response
+
+    // After coroutine switch, set the recoder
+    auto blockContext = m_blockContext.lock();
+    if (!blockContext)
+    {
+        BOOST_THROW_EXCEPTION(BCOS_ERROR(-1, "blockContext is null"));
+    }
+
+    blockContext->storage()->setRecoder(m_recoder);
 
     return output;
 }
@@ -133,7 +102,7 @@ CallParameters::UniquePtr TransactionExecutive::execute(CallParameters::UniquePt
 
     if (txGasLimit < m_baseGasRequired)
     {
-        auto callResults = std::make_unique<CallParameters>();
+        auto callResults = std::make_unique<CallParameters>(CallParameters::REVERT);
         callResults->status = (int32_t)TransactionStatus::OutOfGasLimit;
         callResults->message =
             "The gas required by deploying/accessing this contract is more than "
@@ -143,6 +112,14 @@ CallParameters::UniquePtr TransactionExecutive::execute(CallParameters::UniquePt
 
         return callResults;
     }
+
+    // Set the recoder
+    auto blockContext = m_blockContext.lock();
+    if (!blockContext)
+    {
+        BOOST_THROW_EXCEPTION(BCOS_ERROR(-1, "blockContext is null"));
+    }
+    blockContext->storage()->setRecoder(m_recoder);
 
     std::unique_ptr<HostContext> hostContext;
     CallParameters::UniquePtr callResults;
@@ -170,7 +147,6 @@ CallParameters::UniquePtr TransactionExecutive::execute(CallParameters::UniquePt
 std::tuple<std::unique_ptr<HostContext>, CallParameters::UniquePtr> TransactionExecutive::call(
     CallParameters::UniquePtr callParameters)
 {
-    //   m_savepoint = m_s->savepoint();
     auto remainGas = callParameters->gas;
 
     auto blockContext = m_blockContext.lock();
@@ -182,10 +158,11 @@ std::tuple<std::unique_ptr<HostContext>, CallParameters::UniquePtr> TransactionE
     auto precompiledAddress = callParameters->codeAddress;
     if (blockContext->isEthereumPrecompiled(precompiledAddress))
     {
-        auto callResults = std::make_unique<CallParameters>();
+        auto callResults = std::make_unique<CallParameters>(CallParameters::FINISHED);
         auto gas = blockContext->costOfPrecompiled(precompiledAddress, ref(callParameters->data));
         if (remainGas < gas)
         {
+            callResults->type = CallParameters::REVERT;
             callResults->status = (int32_t)TransactionStatus::OutOfGas;
             return {nullptr, std::move(callResults)};
         }
@@ -198,10 +175,12 @@ std::tuple<std::unique_ptr<HostContext>, CallParameters::UniquePtr> TransactionE
             blockContext->executeOriginPrecompiled(precompiledAddress, ref(callParameters->data));
         if (!success)
         {
+            callResults->type = CallParameters::REVERT;
             callResults->status = (int32_t)TransactionStatus::RevertInstruction;
             return {nullptr, std::move(callResults)};
         }
 
+        callResults->status = (int32_t)TransactionStatus::None;
         callResults->data.swap(output);
 
         return {nullptr, std::move(callResults)};
@@ -236,12 +215,9 @@ std::tuple<std::unique_ptr<HostContext>, CallParameters::UniquePtr> TransactionE
     // }
     else
     {
-        auto table = blockContext->storage()->openTable(
-            getContractTableName(callParameters->codeAddress, blockContext->isWasm()));
-        auto hostContext = make_unique<HostContext>(std::move(callParameters), std::move(*table),
-            callParameters->codeAddress,
-            std::bind(&TransactionExecutive::externalRequest, this, std::placeholders::_1),
-            blockContext->currentBlockHeader(), blockContext->isWasm());
+        auto tableName = getContractTableName(callParameters->codeAddress, blockContext->isWasm());
+        auto hostContext = make_unique<HostContext>(
+            std::move(callParameters), shared_from_this(), std::move(tableName));
 
         return {std::move(hostContext), nullptr};
     }
@@ -250,14 +226,6 @@ std::tuple<std::unique_ptr<HostContext>, CallParameters::UniquePtr> TransactionE
 std::tuple<std::unique_ptr<HostContext>, CallParameters::UniquePtr> TransactionExecutive::create(
     CallParameters::UniquePtr callParameters)
 {
-    //   m_s->incNonce(_sender);
-
-    //   m_savepoint = m_s->savepoint();
-
-    // Set nonce before deploying the code. This will also create new
-    // account if it does not exist yet.
-    //   m_s->setNonce(_newAddress, m_s->accountStartNonce());
-
     auto blockContext = m_blockContext.lock();
     if (!blockContext)
     {
@@ -273,7 +241,7 @@ std::tuple<std::unique_ptr<HostContext>, CallParameters::UniquePtr> TransactionE
         // call this function, so inject meter here
         if (!hasWasmPreamble(code))
         {  // if isWASM and the code is not WASM, make it failed
-            auto callResults = std::make_unique<CallParameters>();
+            auto callResults = std::make_unique<CallParameters>(CallParameters::REVERT);
 
             // revert();
             callResults->status = (int32_t)TransactionStatus::WASMValidationFailure;
@@ -290,7 +258,7 @@ std::tuple<std::unique_ptr<HostContext>, CallParameters::UniquePtr> TransactionE
         else
         {
             // revert();
-            auto callResults = std::make_unique<CallParameters>();
+            auto callResults = std::make_unique<CallParameters>(CallParameters::REVERT);
 
             callResults->status = (int32_t)TransactionStatus::WASMValidationFailure;
             callResults->message = "wasm bytecode invalid or use unsupported opcode";
@@ -303,26 +271,23 @@ std::tuple<std::unique_ptr<HostContext>, CallParameters::UniquePtr> TransactionE
 
     // Create the table first
     auto tableName = getContractTableName(newAddress, blockContext->isWasm());
-    blockContext->storage()->createTable(tableName, STORAGE_VALUE);
+    m_storageWrapper->createTable(tableName, STORAGE_VALUE);
 
-    auto table = blockContext->storage()->openTable(tableName);
-
-    auto hostContext = std::make_unique<HostContext>(std::move(callParameters), std::move(*table),
-        newAddress, std::bind(&TransactionExecutive::externalRequest, this, std::placeholders::_1),
-        blockContext->currentBlockHeader(), blockContext->isWasm());
+    auto hostContext = std::make_unique<HostContext>(
+        std::move(callParameters), shared_from_this(), std::move(tableName));
 
     return {std::move(hostContext), nullptr};
 }
 
 CallParameters::UniquePtr TransactionExecutive::go(HostContext& hostContext)
 {
-    auto callResults = std::make_unique<CallParameters>();
+    auto callResults = std::make_unique<CallParameters>(CallParameters::FINISHED);
     callResults->gas = hostContext.gas();
 
     try
     {
         auto getEVMCMessage = [](const BlockContext& blockContext,
-                                  const HostContext& hostContext) -> shared_ptr<evmc_message> {
+                                  const HostContext& hostContext) -> evmc_message {
             // the block number will be larger than 0,
             // can be controlled by the programmers
             assert(blockContext.currentNumber() > 0);
@@ -333,35 +298,35 @@ CallParameters::UniquePtr TransactionExecutive::go(HostContext& hostContext)
             assert(flags != EVMC_STATIC || kind == EVMC_CALL);  // STATIC implies a CALL.
             auto leftGas = static_cast<int64_t>(hostContext.gas());
 
-            auto evmcMessage = std::make_shared<evmc_message>();
-            evmcMessage->kind = kind;
-            evmcMessage->flags = flags;
-            evmcMessage->depth = 0;  // TODO: set depth
-            evmcMessage->gas = leftGas;
-            evmcMessage->input_data = hostContext.data().data();
-            evmcMessage->input_size = hostContext.data().size();
-            evmcMessage->value = toEvmC(h256(0));
-            evmcMessage->create2_salt = toEvmC(0x0_cppui256);
+            evmc_message evmcMessage;
+            evmcMessage.kind = kind;
+            evmcMessage.flags = flags;
+            evmcMessage.depth = 0;  // depth own by scheduler
+            evmcMessage.gas = leftGas;
+            evmcMessage.input_data = hostContext.data().data();
+            evmcMessage.input_size = hostContext.data().size();
+            evmcMessage.value = toEvmC(h256(0));
+            evmcMessage.create2_salt = toEvmC(0x0_cppui256);
 
             if (blockContext.isWasm())
             {
-                evmcMessage->destination_ptr = (uint8_t*)hostContext.myAddress().data();
-                evmcMessage->destination_len = hostContext.codeAddress().size();
+                evmcMessage.destination_ptr = (uint8_t*)hostContext.myAddress().data();
+                evmcMessage.destination_len = hostContext.codeAddress().size();
 
-                evmcMessage->sender_ptr = (uint8_t*)hostContext.caller().data();
-                evmcMessage->sender_len = hostContext.caller().size();
+                evmcMessage.sender_ptr = (uint8_t*)hostContext.caller().data();
+                evmcMessage.sender_len = hostContext.caller().size();
             }
             else
             {
                 auto myAddressBytes = boost::algorithm::unhex(std::string(hostContext.myAddress()));
                 auto callerBytes = boost::algorithm::unhex(std::string(hostContext.caller()));
 
-                evmcMessage->destination = toEvmC(myAddressBytes);
-                evmcMessage->destination_ptr = evmcMessage->destination.bytes;
-                evmcMessage->destination_len = sizeof(evmcMessage->destination.bytes);
-                evmcMessage->sender = toEvmC(callerBytes);
-                evmcMessage->sender_ptr = evmcMessage->sender.bytes;
-                evmcMessage->sender_len = sizeof(evmcMessage->sender.bytes);
+                evmcMessage.destination = toEvmC(myAddressBytes);
+                evmcMessage.destination_ptr = evmcMessage.destination.bytes;
+                evmcMessage.destination_len = sizeof(evmcMessage.destination.bytes);
+                evmcMessage.sender = toEvmC(callerBytes);
+                evmcMessage.sender_ptr = evmcMessage.sender.bytes;
+                evmcMessage.sender_len = sizeof(evmcMessage.sender.bytes);
             }
 
             return evmcMessage;
@@ -386,12 +351,13 @@ CallParameters::UniquePtr TransactionExecutive::go(HostContext& hostContext)
             }
             auto vm = VMFactory::create(vmKind);
 
-            auto ret = vm->exec(hostContext, mode, evmcMessage.get(), code.data(), code.size());
+            auto ret = vm->exec(hostContext, mode, &evmcMessage, code.data(), code.size());
             callResults = parseEVMCResult(hostContext.isCreate(), ret);
 
-            auto outputRef = ret->output();
+            auto outputRef = ret.output();
             if (outputRef.size() > hostContext.evmSchedule().maxCodeSize)
             {
+                callResults->type = CallParameters::REVERT;
                 callResults->status = (int32_t)TransactionStatus::OutOfGas;
                 callResults->message =
                     "Code is too log: " + boost::lexical_cast<std::string>(outputRef.size()) +
@@ -406,6 +372,7 @@ CallParameters::UniquePtr TransactionExecutive::go(HostContext& hostContext)
             {
                 if (hostContext.evmSchedule().exceptionalFailedCodeDeposit)
                 {
+                    callResults->type = CallParameters::REVERT;
                     callResults->status = (int32_t)TransactionStatus::OutOfGas;
                     callResults->message = "exceptionalFailedCodeDeposit";
 
@@ -430,25 +397,28 @@ CallParameters::UniquePtr TransactionExecutive::go(HostContext& hostContext)
 
             auto mode = toRevision(hostContext.evmSchedule());
             auto evmcMessage = getEVMCMessage(*blockContext, hostContext);
-            auto ret = vm->exec(hostContext, mode, evmcMessage.get(), code.data(), code.size());
+            auto ret = vm->exec(hostContext, mode, &evmcMessage, code.data(), code.size());
             callResults = parseEVMCResult(hostContext.isCreate(), ret);
         }
     }
     catch (RevertInstruction& _e)
     {
-        // revert();
         // writeErrInfoToOutput(_e.what());
+        callResults->type = CallParameters::REVERT;
         callResults->status = (int32_t)TransactionStatus::RevertInstruction;
+        revert();
     }
     catch (OutOfGas& _e)
     {
-        // revert();
+        callResults->type = CallParameters::REVERT;
         callResults->status = (int32_t)TransactionStatus::OutOfGas;
+        revert();
     }
     catch (GasOverflow const& _e)
     {
-        // revert();
+        callResults->type = CallParameters::REVERT;
         callResults->status = (int32_t)TransactionStatus::GasOverflow;
+        revert();
     }
 #if 0
         catch (VMException const& _e)
@@ -461,27 +431,30 @@ CallParameters::UniquePtr TransactionExecutive::go(HostContext& hostContext)
 #endif
     catch (PermissionDenied const& _e)
     {
-        // revert();
+        callResults->type = CallParameters::REVERT;
         callResults->status = (int32_t)TransactionStatus::PermissionDenied;
+        revert();
     }
     catch (NotEnoughCash const& _e)
     {
-        // revert();
+        callResults->type = CallParameters::REVERT;
         callResults->status = (int32_t)TransactionStatus::NotEnoughCash;
+        revert();
     }
     catch (PrecompiledError const& _e)
     {
-        // revert();
+        callResults->type = CallParameters::REVERT;
         callResults->status = (int32_t)TransactionStatus::PrecompiledError;
+        revert();
     }
     catch (InternalVMError const& _e)
     {
+        callResults->type = CallParameters::REVERT;
         using errinfo_evmcStatusCode =
             boost::error_info<struct tag_evmcStatusCode, evmc_status_code>;
         EXECUTIVE_LOG(WARNING) << "Internal VM Error ("
                                << *boost::get_error_info<errinfo_evmcStatusCode>(_e) << ")\n"
                                << diagnostic_information(_e);
-        // revert();
         exit(1);
     }
     catch (Exception const& _e)
@@ -507,106 +480,44 @@ CallParameters::UniquePtr TransactionExecutive::go(HostContext& hostContext)
     return callResults;
 }
 
-// evmc_result TransactionExecutive::waitReturnValue(
-//     Error::Ptr e, protocol::ExecutionResult::Ptr result)
-// {
-//     // EXTERNAL_CALL, set m_waitResult with promise and call the returnCallback,
-//     // when future return continue to run
-//     promise<evmc_result> prom;
-//     m_waitResult = [this, &prom](bytes&& output, int32_t status, int64_t gasLeft,
-//                        std::string_view newAddress) {
-//         evmc_result result;
-//         result.status_code = transactionStatusToEvmcStatus((protocol::TransactionStatus)status);
-//         result.gas_left = gasLeft;
-//         if (isCreate() && result.status_code == EVMC_SUCCESS)
-//         {
-//             result.release = nullptr;
-//             result.create_address = toEvmC(newAddress);
-//             result.output_data = nullptr;
-//             result.output_size = 0;
-//         }
-//         else
-//         {
-//             // Pass the output to the EVM without a copy. The EVM will delete it
-//             // when finished with it.
+void TransactionExecutive::revert()
+{
+    auto blockContext = m_blockContext.lock();
+    if (!blockContext)
+    {
+        BOOST_THROW_EXCEPTION(BCOS_ERROR(-1, "blockContext is null!"));
+    }
 
-//             // First assign reference. References are not invalidated when vector
-//             // of bytes is moved. See `.takeBytes()` below.
-//             result.output_data = output.data();
-//             result.output_size = output.size();
-
-//             // Place a new vector of bytes containing output in result's reserved
-//             // memory.
-//             auto* data = evmc_get_optional_storage(&result);
-//             static_assert(sizeof(bytes) <= sizeof(*data), "Vector is too big");
-//             new (data) bytes(move(output));
-//             // Set the destructor to delete the vector.
-//             result.release = [](evmc_result const* _result) {
-//                 // check _result is not null
-//                 if (_result == NULL)
-//                 {
-//                     return;
-//                 }
-//                 auto* data = evmc_get_const_optional_storage(_result);
-//                 auto& output = reinterpret_cast<bytes const&>(*data);
-//                 // Explicitly call vector's destructor to release its data.
-//                 // This is normal pattern when placement new operator is used.
-//                 output.~bytes();
-//             };
-//             prom.set_value(result);
-//         }
-//     };
-//     m_returnCallback(std::move(e), move(result));
-//     return prom.get_future().get();
-// }
-
-// bool TransactionExecutive::continueExecution(
-//     bytes&& output, int32_t status, int64_t gasLeft, std::string_view newAddress)
-// {
-//     if (m_waitResult)
-//     {
-//         m_waitResult(std::forward<bytes>(output), status, gasLeft, newAddress);
-//         return true;
-//     }
-//     return false;
-// }
-
-// void TransactionExecutive::revert()
-// {
-//     if (m_hostContext)
-//         m_hostContext->sub().clear();
-
-//     // Set result address to the null one.
-//     m_newAddress = {};
-//     // m_s.rollback(m_savepoint); // TODO: new revert plan
-// }
+    blockContext->storage()->rollback(m_recoder);
+}
 
 CallParameters::UniquePtr TransactionExecutive::parseEVMCResult(
-    bool isCreate, std::shared_ptr<Result> _result)
+    bool isCreate, const Result& _result)
 {
-    auto callResults = std::make_unique<CallParameters>();
-    callResults->type = CallParameters::FINISHED;
+    auto callResults = std::make_unique<CallParameters>(CallParameters::REVERT);
 
     // FIXME: if EVMC_REJECTED, then use default vm to run. maybe wasm call evm
     // need this
-    auto outputRef = _result->output();
-    switch (_result->status())
+    auto outputRef = _result.output();
+    switch (_result.status())
     {
     case EVMC_SUCCESS:
     {
-        callResults->status = _result->status();
-        callResults->gas = _result->gasLeft();
+        callResults->type = CallParameters::FINISHED;
+        callResults->status = _result.status();
+        callResults->gas = _result.gasLeft();
         if (!isCreate)
         {
             callResults->data.assign(outputRef.begin(), outputRef.end());
+            owning_bytes_ref();
         }
         break;
     }
     case EVMC_REVERT:
     {
         // FIXME: Copy the output for now, but copyless version possible.
-        callResults->gas = _result->gasLeft();
-        // revert();
+        callResults->gas = _result.gasLeft();
+        revert();
         callResults->data.assign(outputRef.begin(), outputRef.end());
         // m_output = owning_bytes_ref(
         //     bytes(outputRef.data(), outputRef.data() + outputRef.size()), 0, outputRef.size());
@@ -617,7 +528,7 @@ CallParameters::UniquePtr TransactionExecutive::parseEVMCResult(
     case EVMC_OUT_OF_GAS:
     case EVMC_FAILURE:
     {
-        // revert();
+        revert();
         callResults->status = (int32_t)TransactionStatus::OutOfGas;
         break;
     }
@@ -627,28 +538,28 @@ CallParameters::UniquePtr TransactionExecutive::parseEVMCResult(
     {
         // m_remainGas = 0; //TODO: why set remainGas to 0?
         callResults->status = (int32_t)TransactionStatus::BadInstruction;
-        // revert();
+        revert();
         break;
     }
     case EVMC_BAD_JUMP_DESTINATION:
     {
         // m_remainGas = 0;
         callResults->status = (int32_t)TransactionStatus::BadJumpDestination;
-        // revert();
+        revert();
         break;
     }
     case EVMC_STACK_OVERFLOW:
     {
         // m_remainGas = 0;
         callResults->status = (int32_t)TransactionStatus::OutOfStack;
-        // revert();
+        revert();
         break;
     }
     case EVMC_STACK_UNDERFLOW:
     {
         // m_remainGas = 0;
         callResults->status = (int32_t)TransactionStatus::StackUnderflow;
-        // revert();
+        revert();
         break;
     }
     case EVMC_INVALID_MEMORY_ACCESS:
@@ -656,7 +567,7 @@ CallParameters::UniquePtr TransactionExecutive::parseEVMCResult(
         // m_remainGas = 0;
         EXECUTIVE_LOG(WARNING) << LOG_DESC("VM error, BufferOverrun");
         callResults->status = (int32_t)TransactionStatus::StackUnderflow;
-        // revert();
+        revert();
         break;
     }
     case EVMC_STATIC_MODE_VIOLATION:
@@ -664,7 +575,7 @@ CallParameters::UniquePtr TransactionExecutive::parseEVMCResult(
         // m_remainGas = 0;
         EXECUTIVE_LOG(WARNING) << LOG_DESC("VM error, DisallowedStateChange");
         callResults->status = (int32_t)TransactionStatus::Unknown;
-        // revert();
+        revert();
         break;
     }
     case EVMC_CONTRACT_VALIDATION_FAILURE:
@@ -672,29 +583,30 @@ CallParameters::UniquePtr TransactionExecutive::parseEVMCResult(
         EXECUTIVE_LOG(WARNING) << LOG_DESC(
             "WASM validation failed, contract hash algorithm dose not match host.");
         callResults->status = (int32_t)TransactionStatus::WASMValidationFailure;
-        // revert();
+        revert();
         break;
     }
     case EVMC_ARGUMENT_OUT_OF_RANGE:
     {
         EXECUTIVE_LOG(WARNING) << LOG_DESC("WASM Argument Out Of Range");
         callResults->status = (int32_t)TransactionStatus::WASMArgumentOutOfRange;
-        // revert();
+        revert();
         break;
     }
     case EVMC_WASM_UNREACHABLE_INSTRUCTION:
     {
         EXECUTIVE_LOG(WARNING) << LOG_DESC("WASM Unreachable Instruction");
         callResults->status = (int32_t)TransactionStatus::WASMUnreachableInstruction;
-        // revert();
+        revert();
         break;
     }
     case EVMC_INTERNAL_ERROR:
     default:
     {
-        if (_result->status() <= EVMC_INTERNAL_ERROR)
+        revert();
+        if (_result.status() <= EVMC_INTERNAL_ERROR)
         {
-            BOOST_THROW_EXCEPTION(InternalVMError{} << errinfo_evmcStatusCode(_result->status()));
+            BOOST_THROW_EXCEPTION(InternalVMError{} << errinfo_evmcStatusCode(_result.status()));
         }
         else
         {  // These cases aren't really internal errors, just more specific
@@ -706,13 +618,6 @@ CallParameters::UniquePtr TransactionExecutive::parseEVMCResult(
 
     return callResults;
 }
-
-// void TransactionExecutive::writeErrInfoToOutput(string const& errInfo)
-// {
-//     codec::abi::ContractABICodec abi(m_hashImpl);
-//     auto output = abi.abiIn("Error(string)", errInfo);
-//     m_output = owning_bytes_ref{std::move(output), 0, output.size()};
-// }
 
 std::string TransactionExecutive::getContractTableName(
     const std::string_view& _address, bool _isWasm)
