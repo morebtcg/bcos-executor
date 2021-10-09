@@ -3,6 +3,11 @@
 #include "bcos-framework/interfaces/executor/ExecutionMessage.h"
 #include "interfaces/crypto/CommonType.h"
 #include "libutilities/Common.h"
+#include <boost/iterator/transform_iterator.hpp>
+#include <boost/multi_index/detail/modify_key_adaptor.hpp>
+#include <boost/range/adaptor/transformed.hpp>
+#include <boost/range/adaptors.hpp>
+#include <boost/range/iterator_range_core.hpp>
 
 namespace bcos::test
 {
@@ -36,12 +41,15 @@ public:
     int32_t depth() const override { return m_depth; }
     void setDepth(int32_t depth) override { m_depth = depth; }
 
+    bool create() const override { return m_create; }
+    void setCreate(bool create) override { m_create = create; }
+
     int64_t gasAvailable() const override { return m_gasAvailable; }
     void setGasAvailable(int64_t gasAvailable) override { m_gasAvailable = gasAvailable; }
 
-    bcos::bytesConstRef data() const override { return ref(m_input); }
-    bcos::bytes&& takeData() override { return std::move(m_input); }
-    void setData(bcos::bytes input) override { m_input = std::move(input); }
+    bcos::bytesConstRef data() const override { return ref(m_data); }
+    bcos::bytes&& takeData() override { return std::move(m_data); }
+    void setData(bcos::bytes input) override { m_data = std::move(input); }
 
     bool staticCall() const override { return m_staticCall; }
     void setStaticCall(bool staticCall) override { m_staticCall = staticCall; }
@@ -51,9 +59,6 @@ public:
 
     int32_t status() const override { return m_status; }
     void setStatus(int32_t status) override { m_status = status; }
-
-    bool create() const override { return false; }
-    void setCreate(bool) override {}
 
     std::string_view message() const override { return m_message; }
     void setMessage(std::string message) override { m_message = std::move(message); }
@@ -77,14 +82,26 @@ public:
         m_newEVMContractAddress = std::move(newEVMContractAddress);
     }
 
-    virtual gsl::span<std::string const> const keyLocks() const override { return m_keyLocks; }
-    virtual std::vector<std::string>&& takeKeyLocks() override { return std::move(m_keyLocks); }
-    virtual void setKeyLocks(std::vector<std::string> keyLocks) override
+    std::string_view toStringView(const std::string& it) const { return std::string_view(it); }
+
+    boost::any_range<std::string_view, boost::forward_traversal_tag> keyLocks() const override
     {
-        m_keyLocks = std::move(keyLocks);
+        return boost::adaptors::transform(
+            m_keyLocks, [](auto&& it) { return std::string_view(it); });
+    }
+    
+    void setKeyLocks(boost::any_range<std::string, boost::forward_traversal_tag> keyLocks) override
+    {
+        m_keyLocks.clear();
+        for (auto& it : keyLocks)
+        {
+            m_keyLocks.emplace_back(std::move(it));
+        }
     }
 
-    Type m_type;
+    std::string_view keyLockAcquired() const override { return m_keyLockAcquired; }
+    void setKeyLockAcquired(std::string keyLock) override { m_keyLockAcquired = keyLock; }
+
     bcos::crypto::HashType m_transactionHash;
     int64_t m_contextID;
     int64_t m_seq;
@@ -93,17 +110,23 @@ public:
     std::string m_from;
     std::string m_to;
 
-    int32_t m_depth;
     int64_t m_gasAvailable;
-    bcos::bytes m_input;
-    bool m_staticCall;
+    bcos::bytes m_data;
+
     std::optional<u256> m_createSalt;
 
-    int32_t m_status;
     std::string m_message;
     std::vector<bcos::protocol::LogEntry> m_logEntries;
     std::string m_newEVMContractAddress;
+
+    int32_t m_status;
+    int32_t m_depth;
+    Type m_type;
+    bool m_create;
+    bool m_staticCall;
+
     std::vector<std::string> m_keyLocks;
+    std::string m_keyLockAcquired;
 };
 
 class MockExecutionMessageFactory : public protocol::ExecutionMessageFactory

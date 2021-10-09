@@ -22,19 +22,24 @@
 #include "../mock/MockExecutionMessage.h"
 #include "../mock/MockTransactionalStorage.h"
 #include "../mock/MockTxPool.h"
+#include "ChecksumAddress.h"
 #include "Common.h"
 #include "bcos-executor/TransactionExecutor.h"
 #include "interfaces/crypto/CommonType.h"
 #include "interfaces/crypto/CryptoSuite.h"
 #include "interfaces/crypto/Hash.h"
+#include "interfaces/executor/ExecutionMessage.h"
 #include "interfaces/protocol/Transaction.h"
 #include "libprotocol/protobuf/PBBlockHeader.h"
 #include "libstorage/StateStorage.h"
+#include "precompiled/PrecompiledCodec.h"
 #include <bcos-framework/testutils/crypto/HashImpl.h>
 #include <bcos-framework/testutils/crypto/SignatureImpl.h>
 #include <bcos-framework/testutils/protocol/FakeBlockHeader.h>
 #include <bcos-framework/testutils/protocol/FakeTransaction.h>
 #include <boost/algorithm/hex.hpp>
+#include <boost/algorithm/string.hpp>
+#include <boost/test/tools/old/interface.hpp>
 #include <boost/test/unit_test.hpp>
 #include <iostream>
 #include <iterator>
@@ -54,7 +59,7 @@ struct TransactionExecutorFixture
 {
     TransactionExecutorFixture()
     {
-        auto hashImpl = std::make_shared<Keccak256Hash>();
+        hashImpl = std::make_shared<Keccak256Hash>();
         assert(hashImpl);
         auto signatureImpl = std::make_shared<Secp256k1SignatureImpl>();
         assert(signatureImpl);
@@ -66,12 +71,31 @@ struct TransactionExecutorFixture
 
         executor = std::make_shared<TransactionExecutor>(
             txpool, backend, executionResultFactory, hashImpl, false);
+
+        keyPair = cryptoSuite->signatureImpl()->generateKeyPair();
+        memcpy(keyPair->secretKey()->mutableData(),
+            fromHexString("ff6f30856ad3bae00b1169808488502786a13e3c174d85682135ffd51310310e")
+                ->data(),
+            32);
+        memcpy(keyPair->publicKey()->mutableData(),
+            fromHexString(
+                "ccd8de502ac45462767e649b462b5f4ca7eadd69c7e1f1b410bdf754359be29b1b88ffd79744"
+                "03f56e250af52b25682014554f7b3297d6152401e85d426a06ae")
+                ->data(),
+            64);
+
+        codec = std::make_unique<bcos::precompiled::PrecompiledCodec>(hashImpl, false);
     }
 
     TransactionExecutor::Ptr executor;
     CryptoSuite::Ptr cryptoSuite;
     std::shared_ptr<MockTxPool> txpool;
     std::shared_ptr<MockTransactionalStorage> backend;
+    std::shared_ptr<Keccak256Hash> hashImpl;
+
+    KeyPairInterface::Ptr keyPair;
+    int64_t gas = 3000000;
+    std::unique_ptr<bcos::precompiled::PrecompiledCodec> codec;
 
     string helloBin =
         "60806040526040805190810160405280600181526020017f3100000000000000000000000000000000000000"
@@ -114,25 +138,13 @@ BOOST_FIXTURE_TEST_SUITE(TestTransactionExecutor, TransactionExecutorFixture)
 
 BOOST_AUTO_TEST_CASE(deployAndCall)
 {
-    auto keyPair = cryptoSuite->signatureImpl()->generateKeyPair();
-    memcpy(keyPair->secretKey()->mutableData(),
-        fromHexString("ff6f30856ad3bae00b1169808488502786a13e3c174d85682135ffd51310310e")->data(),
-        32);
-    memcpy(keyPair->publicKey()->mutableData(),
-        fromHexString("ccd8de502ac45462767e649b462b5f4ca7eadd69c7e1f1b410bdf754359be29b1b88ffd79744"
-                      "03f56e250af52b25682014554f7b3297d6152401e85d426a06ae")
-            ->data(),
-        64);
-
-    int64_t gas = 3000000;
-    cout << keyPair->secretKey()->hex() << endl << keyPair->publicKey()->hex() << endl;
-    auto to = boost::algorithm::hex_lower(keyPair->address(cryptoSuite->hashImpl()).asBytes());
     auto helloworld = string(helloBin);
 
     bytes input;
     boost::algorithm::unhex(helloworld, std::back_inserter(input));
     auto tx = fakeTransaction(cryptoSuite, keyPair, "", input, 101, 100001, "1", "1");
     auto sender = *toHexString(string_view((char*)tx->sender().data(), tx->sender().size()));
+    toChecksumAddress(sender, hashImpl);
 
     auto hash = tx->hash();
     txpool->hash2Transaction.emplace(hash, tx);
@@ -141,13 +153,24 @@ BOOST_AUTO_TEST_CASE(deployAndCall)
     params->setContextID(100);
     params->setSeq(1000);
     params->setDepth(0);
+
+    params->setOrigin(std::string(sender));
     params->setFrom(std::string(sender));
-    // params->setTo(std::string((char*)to.data(), to.size())); create transaction
+
+    // The contract address
+    h256 addressCreate("ff6f30856ad3bae00b1169808488502786a13e3c174d85682135ffd51310310e");
+    std::string addressString = addressCreate.hex().substr(0, 40);
+    toChecksumAddress(addressString, hashImpl);
+    params->setTo(std::move(addressString));
+
     params->setStaticCall(false);
     params->setGasAvailable(gas);
     params->setData(input);
     params->setType(MockExecutionMessage::TXHASH);
     params->setTransactionHash(hash);
+    params->setCreate(true);
+
+    MockExecutionMessage paramsBak = *params;
 
     auto blockHeader = std::make_shared<bcos::protocol::PBBlockHeader>(cryptoSuite);
     blockHeader->setNumber(1);
@@ -168,6 +191,10 @@ BOOST_AUTO_TEST_CASE(deployAndCall)
 
     auto result = executePromise.get_future().get();
     BOOST_CHECK_EQUAL(result->status(), 0);
+
+    BOOST_CHECK_EQUAL(result->origin(), paramsBak.origin());
+    BOOST_CHECK_EQUAL(result->from(), paramsBak.to());
+    BOOST_CHECK_EQUAL(result->to(), paramsBak.from());
 
     BOOST_CHECK(result->message().empty());
     BOOST_CHECK(!result->newEVMContractAddress().empty());
@@ -296,7 +323,247 @@ BOOST_AUTO_TEST_CASE(deployAndCall)
         "00000000000000000000000000");
 }
 
-BOOST_AUTO_TEST_CASE(corountine) {}
+BOOST_AUTO_TEST_CASE(externalCall)
+{
+    // Solidity source code from test_external_call.sol, using solc
+    // 0.6.6+commit.6c089d02.Emscripten.clang
+
+    std::string ABin =
+        "608060405234801561001057600080fd5b50610314806100206000396000f30060806040526004361061004157"
+        "6000357c0100000000000000000000000000000000000000000000000000000000900463ffffffff1680635b97"
+        "5a7314610046575b600080fd5b34801561005257600080fd5b5061007160048036038101908080359060200190"
+        "929190505050610087565b6040518082815260200191505060405180910390f35b6000816100926101bf565b80"
+        "828152602001915050604051809103906000f0801580156100b8573d6000803e3d6000fd5b506000806101000a"
+        "81548173ffffffffffffffffffffffffffffffffffffffff021916908373ffffffffffffffffffffffffffffff"
+        "ffffffffff1602179055506000809054906101000a900473ffffffffffffffffffffffffffffffffffffffff16"
+        "73ffffffffffffffffffffffffffffffffffffffff16633fa4f2456040518163ffffffff167c01000000000000"
+        "00000000000000000000000000000000000000000000028152600401602060405180830381600087803b158015"
+        "61017d57600080fd5b505af1158015610191573d6000803e3d6000fd5b505050506040513d60208110156101a7"
+        "57600080fd5b81019080805190602001909291905050509050919050565b604051610119806101d08339019056"
+        "00608060405234801561001057600080fd5b506040516020806101198339810180604052810190808051906020"
+        "0190929190505050806000819055505060d0806100496000396000f3006080604052600436106049576000357c"
+        "0100000000000000000000000000000000000000000000000000000000900463ffffffff1680633fa4f2451460"
+        "4e578063a16fe09b146076575b600080fd5b348015605957600080fd5b506060608a565b604051808281526020"
+        "0191505060405180910390f35b348015608157600080fd5b5060886093565b005b60008054905090565b600080"
+        "8154600101919050819055505600a165627a7a72305820ef453a630f3810f42d0b9b9745396ea928d8ad0f762b"
+        "158200a699e92876ff840029a165627a7a72305820e53e699223986ca2c9bf2d53f11d594168d858f7ea67c169"
+        "cadb44950f7cc8db0029";
+
+    std::string BBin =
+        "608060405234801561001057600080fd5b50604051610105380380610105833981810160405260208110156100"
+        "3357600080fd5b8101908080519060200190929190505050806000819055505060ab8061005a6000396000f3fe"
+        "6080604052348015600f57600080fd5b506004361060325760003560e01c80633fa4f245146037578063a16fe0"
+        "9b146053575b600080fd5b603d605b565b6040518082815260200191505060405180910390f35b60596064565b"
+        "005b60008054905090565b60008081546001019190508190555056fea2646970667358221220214f0037b653f3"
+        "ca36b8e77f9859af35cce186e03186594eb454877aa283f20e64736f6c63430006060033";
+
+    bytes input;
+    boost::algorithm::unhex(ABin, std::back_inserter(input));
+    auto tx = fakeTransaction(cryptoSuite, keyPair, "", input, 101, 100001, "1", "1");
+    auto sender = boost::algorithm::hex_lower(std::string(tx->sender()));
+    toChecksumAddress(sender, hashImpl);
+
+    auto hash = tx->hash();
+    txpool->hash2Transaction.emplace(hash, tx);
+
+    auto params = std::make_unique<MockExecutionMessage>();
+    params->setContextID(100);
+    params->setSeq(1000);
+    params->setDepth(0);
+
+    params->setOrigin(std::string(sender));
+    params->setFrom(std::string(sender));
+
+    // The contract address
+    h256 addressCreate("ff6f30856ad3bae00b1169808488502786a13e3c174d85682135ffd51310310e");
+    std::string addressString = addressCreate.hex().substr(0, 40);
+    toChecksumAddress(addressString, hashImpl);
+    params->setTo(std::move(addressString));
+
+    params->setStaticCall(false);
+    params->setGasAvailable(gas);
+    params->setData(input);
+    params->setType(MockExecutionMessage::TXHASH);
+    params->setTransactionHash(hash);
+    params->setCreate(true);
+
+    MockExecutionMessage paramsBak = *params;
+
+    auto blockHeader = std::make_shared<bcos::protocol::PBBlockHeader>(cryptoSuite);
+    blockHeader->setNumber(1);
+
+    std::promise<void> nextPromise;
+    executor->nextBlockHeader(blockHeader, [&](bcos::Error::Ptr&& error) {
+        BOOST_CHECK(!error);
+        nextPromise.set_value();
+    });
+    nextPromise.get_future().get();
+
+    // --------------------------------
+    // Create contract A
+    // --------------------------------
+    std::promise<bcos::protocol::ExecutionMessage::UniquePtr> executePromise;
+    executor->executeTransaction(std::move(params),
+        [&](bcos::Error::UniquePtr&& error, bcos::protocol::ExecutionMessage::UniquePtr&& result) {
+            BOOST_CHECK(!error);
+            executePromise.set_value(std::move(result));
+        });
+
+    auto result = executePromise.get_future().get();
+
+    auto address = result->newEVMContractAddress();
+    BOOST_CHECK_EQUAL(result->type(), MockExecutionMessage::FINISHED);
+    BOOST_CHECK_EQUAL(result->status(), 0);
+    BOOST_CHECK_GT(address.size(), 0);
+
+    // --------------------------------
+    // Call A createAndCallB(int256)
+    // --------------------------------
+    auto params2 = std::make_unique<MockExecutionMessage>();
+    params2->setContextID(101);
+    params2->setSeq(1001);
+    params2->setDepth(0);
+    params2->setFrom(std::string(sender));
+    params2->setTo(std::string(address));
+    params2->setOrigin(std::string(sender));
+    params2->setStaticCall(false);
+    params2->setGasAvailable(gas);
+    params2->setCreate(false);
+
+    bcos::u256 value(1000);
+    params2->setData(codec->encodeWithSig("createAndCallB(int256)", value));
+    params2->setType(MockExecutionMessage::MESSAGE);
+
+    std::promise<ExecutionMessage::UniquePtr> executePromise2;
+    executor->executeTransaction(std::move(params2),
+        [&](bcos::Error::UniquePtr&& error, MockExecutionMessage::UniquePtr&& result) {
+            BOOST_CHECK(!error);
+            executePromise2.set_value(std::move(result));
+        });
+    auto result2 = executePromise2.get_future().get();
+
+    BOOST_CHECK(result2);
+    BOOST_CHECK_EQUAL(result2->type(), ExecutionMessage::MESSAGE);
+    BOOST_CHECK_EQUAL(result2->data().size(), 313);
+    BOOST_CHECK_EQUAL(result2->contextID(), 101);
+    BOOST_CHECK_EQUAL(result2->seq(), 1001);
+    BOOST_CHECK_EQUAL(result2->create(), true);
+    BOOST_CHECK_EQUAL(result2->newEVMContractAddress(), "");
+    BOOST_CHECK_EQUAL(result2->origin(), std::string(sender));
+    BOOST_CHECK_EQUAL(result2->from(), std::string(address));
+    BOOST_CHECK(result2->to().empty());
+    BOOST_CHECK_LT(result2->gasAvailable(), gas);
+
+    // --------------------------------
+    // Message 1: Create contract B, set new seq 1002
+    // A -> B
+    // --------------------------------
+    result2->setSeq(1002);
+
+    h256 addressCreate2(
+        "ee6f30856ad3bae00b1169808488502786a13e3c174d85682135ffd51310310e");  // ee6f30856ad3bae00b1169808488502786a13e3c
+    std::string addressString2 = addressCreate2.hex().substr(0, 40);
+    toChecksumAddress(addressString2, hashImpl);
+    result2->setTo(addressString2);
+
+    std::promise<ExecutionMessage::UniquePtr> executePromise3;
+    executor->executeTransaction(std::move(result2),
+        [&](bcos::Error::UniquePtr&& error, bcos::protocol::ExecutionMessage::UniquePtr&& result) {
+            BOOST_CHECK(!error);
+            executePromise3.set_value(std::move(result));
+        });
+    auto result3 = executePromise3.get_future().get();
+
+    BOOST_CHECK(result3);
+    BOOST_CHECK_EQUAL(result3->type(), ExecutionMessage::FINISHED);
+    BOOST_CHECK_EQUAL(result3->data().size(), 0);
+    BOOST_CHECK_EQUAL(result3->contextID(), 101);
+    BOOST_CHECK_EQUAL(result3->seq(), 1002);
+    BOOST_CHECK_EQUAL(result3->origin(), std::string(sender));
+    BOOST_CHECK_EQUAL(result3->from(), addressString2);
+    BOOST_CHECK_EQUAL(result3->to(), std::string(address));
+    BOOST_CHECK_EQUAL(result3->newEVMContractAddress(), addressString2);
+    BOOST_CHECK_EQUAL(result3->create(), false);
+    BOOST_CHECK_EQUAL(result3->status(), 0);
+
+    // --------------------------------
+    // Message 2: Create contract B success return, set previous seq 1001
+    // B -> A
+    // --------------------------------
+    result3->setSeq(1001);
+    std::promise<ExecutionMessage::UniquePtr> executePromise4;
+    executor->executeTransaction(std::move(result3),
+        [&](bcos::Error::UniquePtr&& error, bcos::protocol::ExecutionMessage::UniquePtr&& result) {
+            BOOST_CHECK(!error);
+            executePromise4.set_value(std::move(result));
+        });
+    auto result4 = executePromise4.get_future().get();
+
+    BOOST_CHECK(result4);
+    BOOST_CHECK_EQUAL(result4->type(), ExecutionMessage::MESSAGE);
+    BOOST_CHECK_GT(result4->data().size(), 0);
+    auto param = codec->encodeWithSig("value()");
+    BOOST_CHECK(result4->data().toBytes() == param);
+    BOOST_CHECK_EQUAL(result4->contextID(), 101);
+    BOOST_CHECK_EQUAL(result4->seq(), 1001);
+    BOOST_CHECK_EQUAL(result4->from(), std::string(address));
+    BOOST_CHECK_EQUAL(result4->to(), std::string(addressString2));
+
+    // Request message without status
+    // BOOST_CHECK_EQUAL(result4->status(), 0);
+    BOOST_CHECK(result4->message().empty());
+    BOOST_CHECK(result4->newEVMContractAddress().empty());
+
+    // --------------------------------
+    // Message 3: A call B's value(), set new seq 1003
+    // A -> B
+    // --------------------------------
+    result4->setSeq(1003);
+    std::promise<ExecutionMessage::UniquePtr> executePromise5;
+    executor->executeTransaction(std::move(result4),
+        [&](bcos::Error::UniquePtr&& error, bcos::protocol::ExecutionMessage::UniquePtr&& result) {
+            BOOST_CHECK(!error);
+            executePromise5.set_value(std::move(result));
+        });
+    auto result5 = executePromise5.get_future().get();
+
+    BOOST_CHECK(result5);
+    BOOST_CHECK_EQUAL(result5->type(), ExecutionMessage::FINISHED);
+    BOOST_CHECK_GT(result5->data().size(), 0);
+    param = codec->encode(s256(1000));
+    BOOST_CHECK(result5->data().toBytes() == param);
+    BOOST_CHECK_EQUAL(result5->contextID(), 101);
+    BOOST_CHECK_EQUAL(result5->seq(), 1003);
+    BOOST_CHECK_EQUAL(result5->from(), std::string(addressString2));
+    BOOST_CHECK_EQUAL(result5->to(), std::string(address));
+    BOOST_CHECK_EQUAL(result5->status(), 0);
+    BOOST_CHECK(result5->message().empty());
+
+    // --------------------------------
+    // Message 4: A call B's success return, set previous seq 1001
+    // B -> A
+    // --------------------------------
+    result5->setSeq(1001);
+    std::promise<ExecutionMessage::UniquePtr> executePromise6;
+    executor->executeTransaction(std::move(result5),
+        [&](bcos::Error::UniquePtr&& error, bcos::protocol::ExecutionMessage::UniquePtr&& result) {
+            BOOST_CHECK(!error);
+            executePromise6.set_value(std::move(result));
+        });
+    auto result6 = executePromise6.get_future().get();
+
+    BOOST_CHECK(result6);
+    BOOST_CHECK_EQUAL(result6->type(), ExecutionMessage::FINISHED);
+    BOOST_CHECK_GT(result6->data().size(), 0);
+    BOOST_CHECK(result6->data().toBytes() == param);
+    BOOST_CHECK_EQUAL(result6->contextID(), 101);
+    BOOST_CHECK_EQUAL(result6->seq(), 1001);
+    BOOST_CHECK_EQUAL(result6->from(), std::string(address));
+    BOOST_CHECK_EQUAL(result6->to(), std::string(sender));
+    BOOST_CHECK_EQUAL(result6->origin(), std::string(sender));
+    BOOST_CHECK_EQUAL(result6->status(), 0);
+    BOOST_CHECK(result6->message().empty());
+}
 
 BOOST_AUTO_TEST_SUITE_END()
 }  // namespace test

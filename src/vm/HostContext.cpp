@@ -29,6 +29,7 @@
 #include "evmc/evmc.hpp"
 #include "libutilities/Common.h"
 #include <evmc/evmc.h>
+#include <evmc/helpers.h>
 #include <boost/algorithm/hex.hpp>
 #include <boost/algorithm/string/split.hpp>
 #include <boost/thread.hpp>
@@ -123,14 +124,9 @@ evmc_result HostContext::externalRequest(const evmc_message* _msg)
     // Convert evmc_message to CallParameters
     auto request = std::make_unique<CallParameters>(CallParameters::MESSAGE);
 
-    if (_msg->input_size > 0)
-    {
-        request->data.assign(_msg->input_data, _msg->input_data + _msg->input_size);
-    }
-
     request->senderAddress = myAddress();
     request->origin = origin();
-    request->gas = _msg->gas;
+    request->status = 0;
 
     switch (_msg->kind)
     {
@@ -145,23 +141,31 @@ evmc_result HostContext::externalRequest(const evmc_message* _msg)
         else
         {
             auto receiveAddressBytes = fromEvmC(_msg->destination);
+            request->receiveAddress.reserve(receiveAddressBytes.size() * 2);
             boost::algorithm::hex_lower(receiveAddressBytes.begin(), receiveAddressBytes.end(),
                 std::back_inserter(request->receiveAddress));
+            // TODO: to checksum address
         }
+
         request->codeAddress = request->receiveAddress;
+        request->data.assign(_msg->input_data, _msg->input_data + _msg->input_size);
         break;
     case EVMC_DELEGATECALL:
     case EVMC_CALLCODE:
         BOOST_THROW_EXCEPTION(BCOS_ERROR(-1, "Unspoort opcode EVM_DELEGATECALL or EVM_CALLCODE"));
         break;
     case EVMC_CREATE:
-        // nothing to do
+        request->data.assign(_msg->input_data, _msg->input_data + _msg->input_size);
+        request->create = true;
         break;
     }
     // if (built in precompiled) then execute locally
     auto blockContext = m_executive->blockContext().lock();
     auto it = std::find(blockContext->getBuiltInPrecompiled()->begin(),
         blockContext->getBuiltInPrecompiled()->end(), request->receiveAddress);
+
+    request->gas = _msg->gas;
+
     if (it != blockContext->getBuiltInPrecompiled()->end())
     {
         auto callResults = std::make_unique<CallParameters>(CallParameters::FINISHED);
@@ -185,6 +189,8 @@ evmc_result HostContext::externalRequest(const evmc_message* _msg)
         m_responseStore.emplace_back(std::move(callResults));
         return preResult;
     }
+
+    request->staticCall = m_callParameters->staticCall;
 
     auto response = m_executive->externalCall(std::move(request));
 
@@ -222,13 +228,13 @@ void HostContext::setCode(bytes code)
 size_t HostContext::codeSizeAt(const std::string_view& _a)
 {
     (void)_a;
-    return 10 * 1024;  // 10k code size ok?
+    return 1;  // TODO: 1 code size ok?
 }
 
 h256 HostContext::codeHashAt(const std::string_view& _a)
 {
     (void)_a;
-    return h256("0x1234567");  // ok?
+    return h256();  // TODO: ok?
 }
 
 u256 HostContext::store(const u256& _n)
@@ -277,6 +283,7 @@ void HostContext::log(h256s&& _topics, bytesConstRef _data)
     //     m_sub.logs->push_back(
     //         protocol::LogEntry(asBytes(hexAddress), std::move(_topics), _data.toBytes()));
     // }
+
     m_sub.logs->push_back(
         protocol::LogEntry(bytes(myAddress().data(), myAddress().data() + myAddress().size()),
             std::move(_topics), _data.toBytes()));

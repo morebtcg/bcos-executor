@@ -136,8 +136,9 @@ private:
         std::function<void(bcos::Error::UniquePtr&&, bcos::protocol::ExecutionMessage::UniquePtr&&)>
             callback);
 
-    void onCallResultsCallback(std::shared_ptr<TransactionExecutive> executive,
-        std::unique_ptr<CallParameters> callResults);
+    void externalCall(std::shared_ptr<TransactionExecutive> executive,
+        std::unique_ptr<CallParameters> callResults,
+        std::function<void(Error::UniquePtr, std::unique_ptr<CallParameters>)> callback);
 
     std::string newEVMAddress(
         const std::string_view& sender, int64_t blockNumber, int64_t contextID);
@@ -145,16 +146,10 @@ private:
         const std::string_view& _sender, bytesConstRef _init, u256 const& _salt);
 
     std::unique_ptr<CallParameters> createCallParameters(
-        const bcos::protocol::ExecutionMessage& inputs, const BlockContext& blockContext,
-        bool staticCall);
+        const bcos::protocol::ExecutionMessage& inputs, bool staticCall);
 
     std::unique_ptr<CallParameters> createCallParameters(
-        std::shared_ptr<bcos::protocol::Transaction>&& tx, const BlockContext& blockContext,
-        int64_t contextID);
-
-    std::unique_ptr<CallParameters> createCallParameters(
-        const bcos::protocol::ExecutionMessage& input, bcos::protocol::Transaction::Ptr&& tx,
-        const BlockContext& blockContext);
+        const bcos::protocol::ExecutionMessage& input, bcos::protocol::Transaction::Ptr&& tx);
 
     std::optional<std::vector<bcos::bytes>> decodeConflictFields(
         const FunctionAbi& functionAbi, bcos::protocol::Transaction* transaction);
@@ -177,7 +172,7 @@ private:
     std::list<State> m_stateStorages;  // TODO: need lock to deal with
                                        // nextBlock and prepare?
 
-    std::list<State>::const_iterator m_lastUncommitedIterator;  // last uncommited storage
+    std::list<State>::const_iterator m_lastUncommittedIterator;  // last uncommitted storage
 
     std::shared_ptr<std::map<std::string, std::shared_ptr<PrecompiledContract>>>
         m_precompiledContract;

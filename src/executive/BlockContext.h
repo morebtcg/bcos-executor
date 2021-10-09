@@ -32,6 +32,7 @@
 #include <functional>
 #include <memory>
 #include <stack>
+#include <string_view>
 
 namespace bcos
 {
@@ -47,7 +48,6 @@ namespace executor
 class TransactionExecutive;
 class PrecompiledContract;
 
-typedef std::function<crypto::HashType(int64_t x)> CallBackFunction;
 class BlockContext : public std::enable_shared_from_this<BlockContext>
 {
 public:
@@ -141,7 +141,8 @@ public:
 
     std::tuple<std::shared_ptr<TransactionExecutive>,
         std::function<void(
-            bcos::Error::UniquePtr&&, bcos::protocol::ExecutionMessage::UniquePtr&&)>>*
+            bcos::Error::UniquePtr&&, bcos::protocol::ExecutionMessage::UniquePtr&&)>,
+        std::function<void(bcos::Error::UniquePtr&&, CallParameters::UniquePtr)>>*
     getExecutive(int64_t contextID, int64_t seq);
 
     void clear() { m_executives.clear(); }
@@ -168,7 +169,8 @@ private:
     tbb::concurrent_unordered_map<std::tuple<int64_t, int64_t>,
         std::tuple<std::shared_ptr<TransactionExecutive>,
             std::function<void(
-                bcos::Error::UniquePtr&&, bcos::protocol::ExecutionMessage::UniquePtr&&)>>,
+                bcos::Error::UniquePtr&&, bcos::protocol::ExecutionMessage::UniquePtr&&)>,
+            std::function<void(bcos::Error::UniquePtr&&, CallParameters::UniquePtr)>>,
         HashCombine>
         m_executives;
 

@@ -73,14 +73,15 @@ public:
 
     TransactionExecutive(std::weak_ptr<BlockContext> blockContext, std::string contractAddress,
         int64_t contextID, int64_t seq,
-        std::function<void(
-            std::shared_ptr<TransactionExecutive> executive, CallParameters::UniquePtr&&)>
+        std::function<void(std::shared_ptr<TransactionExecutive> executive,
+            std::unique_ptr<CallParameters> callResults,
+            std::function<void(Error::UniquePtr, std::unique_ptr<CallParameters>)> callback)>
             externalCallCallback)
       : m_blockContext(std::move(blockContext)),
         m_contractAddress(std::move(contractAddress)),
         m_contextID(contextID),
         m_seq(seq),
-        m_externalCallCallback(std::move(externalCallCallback)),
+        m_externalCallFunction(std::move(externalCallCallback)),
         m_gasInjector(std::make_shared<wasm::GasInjector>(wasm::GetInstructionTable()))
     {
         m_recoder = m_blockContext.lock()->storage()->newRecoder();
@@ -93,8 +94,7 @@ public:
 
     virtual ~TransactionExecutive() {}
 
-    void start(CallParameters::UniquePtr input);  // start a new corountine to execute
-                                                  // parameters
+    void start(CallParameters::UniquePtr input);  // start a new coroutine to execute
 
     void pushMessage(CoroutineMessage message)  // call by executor
     {
@@ -116,7 +116,7 @@ public:
 
     CallParameters::UniquePtr execute(
         CallParameters::UniquePtr callParameters);  // execute parameters in
-                                                    // current corounitine
+                                                    // current corouitine
 
 private:
     std::tuple<std::unique_ptr<HostContext>, CallParameters::UniquePtr> call(
@@ -127,7 +127,8 @@ private:
 
     void revert();
 
-    CallParameters::UniquePtr parseEVMCResult(bool isCreate, const Result& _result);
+    CallParameters::UniquePtr parseEVMCResult(
+        CallParameters::UniquePtr callResults, const Result& _result);
 
     void writeErrInfoToOutput(std::string const& errInfo, bytes& output)
     {
@@ -150,20 +151,21 @@ private:
     int64_t m_seq;
     crypto::Hash::Ptr m_hashImpl;
 
-    int64_t m_baseGasRequired = 0;  ///< The base amount of gas requried for executing
+    int64_t m_baseGasRequired = 0;  ///< The base amount of gas required for executing
                                     ///< this transaction.
 
-    std::function<void(
-        std::shared_ptr<TransactionExecutive> executive, CallParameters::UniquePtr&&)>
-        m_externalCallCallback;
+    std::function<void(std::shared_ptr<TransactionExecutive> executive,
+        std::unique_ptr<CallParameters> callResults,
+        std::function<void(Error::UniquePtr, std::unique_ptr<CallParameters>)> callback)>
+        m_externalCallFunction;
 
     std::shared_ptr<wasm::GasInjector> m_gasInjector;
 
     std::unique_ptr<Coroutine::push_type> m_pushMessage;
     std::unique_ptr<Coroutine::pull_type> m_pullMessage;
     bcos::storage::StateStorage::Recoder::Ptr m_recoder;
-    std::set<std::string> m_keyLocks;
     std::unique_ptr<CoroutineStorageWrapper<CoroutineMessage>> m_storageWrapper;
+    bool m_finished = false;
 };
 
 }  // namespace executor

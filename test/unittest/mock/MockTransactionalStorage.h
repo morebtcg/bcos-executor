@@ -56,7 +56,7 @@ public:
 
     void asyncPrepare(const TwoPCParams& params,
         const bcos::storage::TraverseStorageInterface::ConstPtr& storage,
-        std::function<void(Error::Ptr&&)> callback) noexcept override
+        std::function<void(Error::Ptr&&, uint64_t)> callback) noexcept override
     {
         BOOST_CHECK_GT(params.number, 0);
         BOOST_CHECK(storage);
@@ -71,8 +71,8 @@ public:
                 }
 
                 auto keyHex = boost::algorithm::hex_lower(std::string(key));
-                EXECUTOR_LOG(TRACE) << "Merge data" << LOG_KV("table", table) << LOG_KV("key", key)
-                                    << LOG_KV("fields", fields);
+                EXECUTOR_LOG(TRACE) << "Merge data" << LOG_KV("table", table)
+                                    << LOG_KV("key", keyHex) << LOG_KV("fields", fields);
 
                 auto myTable = m_inner->openTable(std::string(table));
                 if (!myTable)
@@ -85,7 +85,7 @@ public:
                 return true;
             });
 
-        callback(nullptr);
+        callback(nullptr, 0);
     }
 
     void asyncCommit(
