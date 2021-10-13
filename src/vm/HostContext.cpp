@@ -20,7 +20,6 @@
  */
 
 #include "HostContext.h"
-#include "../ChecksumAddress.h"
 #include "../Common.h"
 #include "../executive/TransactionExecutive.h"
 #include "EVMHostInterface.h"
@@ -152,7 +151,8 @@ evmc_result HostContext::externalRequest(const evmc_message* _msg)
         break;
     case EVMC_DELEGATECALL:
     case EVMC_CALLCODE:
-        BOOST_THROW_EXCEPTION(BCOS_ERROR(-1, "Unspoort opcode EVM_DELEGATECALL or EVM_CALLCODE"));
+        BOOST_THROW_EXCEPTION(
+            BCOS_ERROR(-1, "Unsupported opcode EVM_DELEGATECALL or EVM_CALLCODE"));
         break;
     case EVMC_CREATE:
         request->data.assign(_msg->input_data, _msg->input_data + _msg->input_size);

@@ -82,7 +82,6 @@ class TransactionExecutor : public ParallelTransactionExecutorInterface,
 public:
     using Ptr = std::shared_ptr<TransactionExecutor>;
     using ConstPtr = std::shared_ptr<const TransactionExecutor>;
-    using CallBackFunction = std::function<crypto::HashType(protocol::BlockNumber x)>;
 
     TransactionExecutor(txpool::TxPoolInterface::Ptr txpool,
         storage::TransactionalStorageInterface::Ptr backendStorage,
@@ -108,10 +107,9 @@ public:
         std::function<void(bcos::Error::UniquePtr&&, bcos::protocol::ExecutionMessage::UniquePtr&&)>
             callback) noexcept override;
 
-    void getTableHashes(bcos::protocol::BlockNumber number,
-        std::function<void(
-            bcos::Error::UniquePtr&&, std::vector<std::tuple<std::string, crypto::HashType>>&&)>
-            callback) noexcept override;
+    void getHash(bcos::protocol::BlockNumber number,
+        std::function<void(bcos::Error::UniquePtr&&, crypto::HashType&&)> callback) noexcept
+        override;
 
     /* ----- XA Transaction interface Start ----- */
 
@@ -151,11 +149,6 @@ private:
         std::unique_ptr<CallParameters> callResults,
         std::function<void(Error::UniquePtr, std::unique_ptr<CallParameters>)> callback);
 
-    std::string newEVMAddress(
-        const std::string_view& sender, int64_t blockNumber, int64_t contextID);
-    std::string newEVMAddress(
-        const std::string_view& _sender, bytesConstRef _init, u256 const& _salt);
-
     std::unique_ptr<CallParameters> createCallParameters(
         const bcos::protocol::ExecutionMessage& inputs, bool staticCall);
 
@@ -182,8 +175,7 @@ private:
         bcos::storage::StateStorage::Ptr storage;
     };
 
-    std::list<State> m_stateStorages;  // TODO: need lock to deal with
-                                       // nextBlock and prepare?
+    std::list<State> m_stateStorages;
 
     std::list<State>::const_iterator m_lastUncommittedIterator;  // last uncommitted storage
 

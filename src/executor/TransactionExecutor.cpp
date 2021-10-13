@@ -20,7 +20,6 @@
  */
 
 #include "bcos-executor/TransactionExecutor.h"
-#include "../ChecksumAddress.h"
 #include "../Common.h"
 #include "../executive/BlockContext.h"
 #include "../executive/TransactionExecutive.h"
@@ -271,7 +270,9 @@ void TransactionExecutor::dagExecuteTransactions(
                 auto executive = createExecutive(
                     m_blockContext, callParameters->codeAddress, input->contextID(), input->seq());
 
-                auto response = executive->execute(std::move(callParameters));
+                auto response =
+                    executive->execute(std::move(callParameters));  // TODO: 用start()代替execute()
+
                 executionResults[i]->setNewEVMContractAddress(response->newEVMContractAddress);
                 executionResults[i]->setLogEntries(response->logEntries);
                 executionResults[i]->setStatus(response->status);
@@ -348,8 +349,8 @@ void TransactionExecutor::executeTransaction(bcos::protocol::ExecutionMessage::U
     std::function<void(bcos::Error::UniquePtr&&, bcos::protocol::ExecutionMessage::UniquePtr&&)>
         callback) noexcept
 {
-    EXECUTOR_LOG(INFO) << "ExecuteTransaction request" << LOG_KV("ContextID", input->contextID())
-                       << LOG_KV("seq", input->seq()) << LOG_KV("Message type", input->type());
+    // EXECUTOR_LOG(INFO) << "ExecuteTransaction request" << LOG_KV("ContextID", input->contextID())
+    //                    << LOG_KV("seq", input->seq()) << LOG_KV("Message type", input->type());
     asyncExecute(std::move(input), false,
         [callback = std::move(callback)](
             Error::UniquePtr&& error, bcos::protocol::ExecutionMessage::UniquePtr&& result) {
@@ -362,46 +363,43 @@ void TransactionExecutor::executeTransaction(bcos::protocol::ExecutionMessage::U
                 return;
             }
 
-            EXECUTOR_LOG(INFO) << "ExecuteTransaction success";
+            // EXECUTOR_LOG(INFO) << "ExecuteTransaction success";
             callback(std::move(error), std::move(result));
         });
 }
 
-void TransactionExecutor::getTableHashes(bcos::protocol::BlockNumber number,
-    std::function<void(
-        bcos::Error::UniquePtr&&, std::vector<std::tuple<std::string, crypto::HashType>>&&)>
-        callback) noexcept
+void TransactionExecutor::getHash(bcos::protocol::BlockNumber number,
+    std::function<void(bcos::Error::UniquePtr&&, crypto::HashType&&)> callback) noexcept
 {
     (void)callback;
 
     EXECUTOR_LOG(INFO) << "GetTableHashes" << LOG_KV("number", number);
-    // if (m_stateStorages.empty())
-    // {
-    //     EXECUTOR_LOG(ERROR) << "GetTableHashes error: No uncommited state in executor";
-    //     callback(BCOS_ERROR_PTR(-1, "No uncommited state in executor"),
-    //         std::vector<std::tuple<std::string, crypto::HashType>>());
-    //     return;
-    // }
 
-    // auto last = m_stateStorages.front();
-    // if (last->blockNumber() != number)
-    // {
-    //     auto errorMessage = "GetTableHashes error: Request block number: " +
-    //                         boost::lexical_cast<std::string>(number) +
-    //                         " not equal to last blockNumber: " +
-    //                         boost::lexical_cast<std::string>(last->blockNumber());
+    if (m_stateStorages.empty())
+    {
+        EXECUTOR_LOG(ERROR) << "GetTableHashes error: No uncommitted state";
+        callback(BCOS_ERROR_UNIQUE_PTR(-1, "No uncommitted state"), crypto::HashType());
+        return;
+    }
 
-    //     EXECUTOR_LOG(ERROR) << errorMessage;
-    //     callback(BCOS_ERROR_PTR(-1, errorMessage),
-    //         std::vector<std::tuple<std::string, crypto::HashType>>());
+    auto last = m_stateStorages.front();
+    if (last.number != number)
+    {
+        auto errorMessage =
+            "GetTableHashes error: Request block number: " +
+            boost::lexical_cast<std::string>(number) +
+            " not equal to last blockNumber: " + boost::lexical_cast<std::string>(last.number);
 
-    //     return;
-    // }
+        EXECUTOR_LOG(ERROR) << errorMessage;
+        callback(BCOS_ERROR_UNIQUE_PTR(-1, errorMessage), crypto::HashType());
 
-    // auto tableHashes = last->tableHashes();
-    // EXECUTOR_LOG(INFO) << "GetTableHashes success" << LOG_KV("size", tableHashes.size());
+        return;
+    }
 
-    // callback(nullptr, std::move(tableHashes));
+    auto hash = last.storage->hash(m_hashImpl);
+    EXECUTOR_LOG(INFO) << "GetTableHashes success" << LOG_KV("hash", hash.hex());
+
+    callback(nullptr, std::move(hash));
 }
 
 void TransactionExecutor::prepare(
@@ -433,12 +431,13 @@ void TransactionExecutor::prepare(
             " not equal to last blockNumber: " + boost::lexical_cast<std::string>(last->number);
 
         EXECUTOR_LOG(ERROR) << errorMessage;
-        callback(BCOS_ERROR_PTR(-1, errorMessage));
+        callback(BCOS_ERROR_PTR(ExecuteError::PREPARE_ERROR, errorMessage));
 
         return;
     }
 
-    bcos::storage::TransactionalStorageInterface::TwoPCParams storageParams;
+    bcos::storage::TransactionalStorageInterface::TwoPCParams storageParams;  // TODO: add tikv
+                                                                              // params
     storageParams.number = params.number;
     m_backendStorage->asyncPrepare(
         storageParams, last->storage, [callback = std::move(callback)](auto&& error, uint64_t) {
@@ -447,7 +446,8 @@ void TransactionExecutor::prepare(
                 auto errorMessage = "Prepare error: " + boost::diagnostic_information(*error);
 
                 EXECUTOR_LOG(ERROR) << errorMessage;
-                callback(BCOS_ERROR_WITH_PREV_PTR(-1, errorMessage, *error));
+                callback(
+                    BCOS_ERROR_WITH_PREV_PTR(ExecuteError::PREPARE_ERROR, errorMessage, *error));
                 return;
             }
 
@@ -464,7 +464,7 @@ void TransactionExecutor::commit(
     if (m_lastUncommittedIterator == m_stateStorages.end())
     {
         EXECUTOR_LOG(ERROR) << "Commit error: No uncommited state in executor";
-        callback(BCOS_ERROR_PTR(-1, "No uncommited state in executor"));
+        callback(BCOS_ERROR_PTR(ExecuteError::COMMIT_ERROR, "No uncommited state in executor"));
         return;
     }
 
@@ -482,7 +482,7 @@ void TransactionExecutor::commit(
         return;
     }
 
-    bcos::storage::TransactionalStorageInterface::TwoPCParams storageParams;
+    bcos::storage::TransactionalStorageInterface::TwoPCParams storageParams;  // Add tikv params
     storageParams.number = params.number;
     m_backendStorage->asyncCommit(storageParams,
         [this, callback = std::move(callback), it = m_stateStorages.begin()](Error::Ptr&& error) {
@@ -499,6 +499,8 @@ void TransactionExecutor::commit(
 
             ++m_lastUncommittedIterator;
             m_blockContext = nullptr;
+
+            // TODO: add clear cache
 
             callback(nullptr);
         });
@@ -549,6 +551,9 @@ void TransactionExecutor::rollback(
 
 void TransactionExecutor::reset(std::function<void(bcos::Error::Ptr&&)> callback) noexcept
 {
+    m_stateStorages.clear();
+    m_lastUncommittedIterator = m_stateStorages.end();
+
     callback(nullptr);
 }
 
@@ -808,6 +813,7 @@ void TransactionExecutor::externalCall(TransactionExecutive::Ptr executive,
                 "," + boost::lexical_cast<std::string>(executive->seq())));
     }
 
+    // TODO: 用结构体放
     if (callback)
     {
         std::get<2>(*it) = std::move(callback);
@@ -817,9 +823,6 @@ void TransactionExecutor::externalCall(TransactionExecutive::Ptr executive,
     switch (params->type)
     {
     case CallParameters::MESSAGE:
-        toChecksumAddress(params->senderAddress, m_hashImpl);
-        toChecksumAddress(params->receiveAddress, m_hashImpl);
-
         message->setFrom(std::move(params->senderAddress));
         message->setTo(std::move(params->receiveAddress));
         message->setType(ExecutionMessage::MESSAGE);
@@ -828,18 +831,12 @@ void TransactionExecutor::externalCall(TransactionExecutive::Ptr executive,
         message->setType(ExecutionMessage::WAIT_KEY);
         break;
     case CallParameters::FINISHED:
-        toChecksumAddress(params->senderAddress, m_hashImpl);
-        toChecksumAddress(params->receiveAddress, m_hashImpl);
-
         // Response message, Swap the from and to
         message->setFrom(std::move(params->receiveAddress));
         message->setTo(std::move(params->senderAddress));
         message->setType(ExecutionMessage::FINISHED);
         break;
     case CallParameters::REVERT:
-        toChecksumAddress(params->senderAddress, m_hashImpl);
-        toChecksumAddress(params->receiveAddress, m_hashImpl);
-
         // Response message, Swap the from and to
         message->setFrom(std::move(params->receiveAddress));
         message->setTo(std::move(params->senderAddress));
@@ -1064,37 +1061,6 @@ void TransactionExecutor::initPrecompiled()
     }
 }
 
-std::string TransactionExecutor::newEVMAddress(
-    const std::string_view& sender, int64_t blockNumber, int64_t contextID)
-{
-    auto hash =
-        m_hashImpl->hash(std::string(sender) + boost::lexical_cast<std::string>(blockNumber) +
-                         boost::lexical_cast<std::string>(contextID));
-
-    std::string hexAddress;
-    hexAddress.reserve(40);
-    boost::algorithm::hex(hash.data(), hash.data() + 20, std::back_inserter(hexAddress));
-
-    toChecksumAddress(hexAddress, m_hashImpl);
-
-    return hexAddress;
-}
-
-std::string TransactionExecutor::newEVMAddress(
-    const std::string_view& _sender, bytesConstRef _init, u256 const& _salt)
-{
-    auto hash = m_hashImpl->hash(
-        bytes{0xff} + toBytes(_sender) + toBigEndian(_salt) + m_hashImpl->hash(_init));
-
-    std::string hexAddress;
-    hexAddress.reserve(40);
-    boost::algorithm::hex(hash.data(), hash.data() + 20, std::back_inserter(hexAddress));
-
-    toChecksumAddress(hexAddress, m_hashImpl);
-
-    return hexAddress;
-}
-
 std::unique_ptr<CallParameters> TransactionExecutor::createCallParameters(
     const bcos::protocol::ExecutionMessage& input, bool staticCall)
 {
@@ -1119,26 +1085,13 @@ std::unique_ptr<CallParameters> TransactionExecutor::createCallParameters(
 {
     auto callParameters = std::make_unique<CallParameters>(CallParameters::MESSAGE);
 
-    bool create = false;
-    if (m_isWasm)
-    {
-        callParameters->origin = tx->sender();
-        callParameters->senderAddress = tx->sender();
-        callParameters->receiveAddress = tx->to();
-        callParameters->codeAddress = callParameters->receiveAddress;
-    }
-    else
-    {
-        callParameters->origin.reserve(tx->sender().size() * 2);
-        boost::algorithm::hex_lower(tx->sender(), std::back_inserter(callParameters->origin));
-        toChecksumAddress(callParameters->origin, m_hashImpl);
+    callParameters->origin.reserve(tx->sender().size() * 2);
+    boost::algorithm::hex_lower(tx->sender(), std::back_inserter(callParameters->origin));
 
-        callParameters->senderAddress = callParameters->origin;
-        callParameters->receiveAddress = input.to();
-        callParameters->codeAddress = callParameters->receiveAddress;
-    }
+    callParameters->senderAddress = callParameters->origin;
+    callParameters->receiveAddress = input.to();
+    callParameters->codeAddress = callParameters->receiveAddress;
 
-    callParameters->create = create;
     callParameters->gas = input.gasAvailable();
     callParameters->data = tx->input().toBytes();
     callParameters->staticCall = false;

@@ -20,7 +20,6 @@
  */
 
 #include "TransactionExecutive.h"
-#include "../ChecksumAddress.h"
 #include "../Common.h"
 #include "../vm/EVMHostInterface.h"
 #include "../vm/HostContext.h"
@@ -70,7 +69,7 @@ void TransactionExecutive::start(CallParameters::UniquePtr input)
 
         execute(std::move(std::get<CallParameters::UniquePtr>(callParameters)));
 
-        EXECUTOR_LOG(TRACE) << "Switching coroutine";
+        // EXECUTOR_LOG(TRACE) << "Switching coroutine";
     });
 
     pushMessage(std::move(input));
@@ -169,6 +168,7 @@ std::tuple<std::unique_ptr<HostContext>, CallParameters::UniquePtr> TransactionE
         BOOST_THROW_EXCEPTION(BCOS_ERROR(-1, "blockContext is null"));
     }
 
+    // TODO: 考虑提取函数
     auto precompiledAddress = callParameters->codeAddress;
     if (isPrecompiled(precompiledAddress))
     {
