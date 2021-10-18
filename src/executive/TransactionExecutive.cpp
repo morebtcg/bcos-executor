@@ -23,9 +23,9 @@
 #include "../Common.h"
 #include "../vm/EVMHostInterface.h"
 #include "../vm/HostContext.h"
+#include "../vm/Precompiled.h"
 #include "../vm/VMFactory.h"
 #include "../vm/VMInstance.h"
-#include "../vm/Precompiled.h"
 #include "BlockContext.h"
 #include "bcos-executor/TransactionExecutor.h"
 #include "bcos-framework/interfaces/protocol/Exceptions.h"
@@ -79,7 +79,7 @@ CallParameters::UniquePtr TransactionExecutive::externalCall(CallParameters::Uni
 {
     std::optional<CallParameters::UniquePtr> value;
 
-    m_externalCallFunction(shared_from_this(), std::move(input),
+    m_externalCallFunction(m_blockContext.lock(), shared_from_this(), std::move(input),
         [this, threadID = std::this_thread::get_id(), value = &value](
             Error::UniquePtr error, CallParameters::UniquePtr response) {
             EXECUTOR_LOG(TRACE) << "Invoke external call callback";
@@ -154,7 +154,7 @@ CallParameters::UniquePtr TransactionExecutive::execute(CallParameters::UniquePt
 
     // Current executive is finished
     m_finished = true;
-    m_externalCallFunction(shared_from_this(), std::move(callResults), {});
+    m_externalCallFunction(m_blockContext.lock(), shared_from_this(), std::move(callResults), {});
 
     return nullptr;
 }
@@ -168,15 +168,14 @@ std::tuple<std::unique_ptr<HostContext>, CallParameters::UniquePtr> TransactionE
         BOOST_THROW_EXCEPTION(BCOS_ERROR(-1, "blockContext is null"));
     }
 
-    // TODO: 考虑提取函数
     auto precompiledAddress = callParameters->codeAddress;
     if (isPrecompiled(precompiledAddress))
     {
         auto callResults = std::make_unique<CallParameters>(CallParameters::FINISHED);
         try
         {
-            auto precompiledResult = callPrecompiled(precompiledAddress,
-                ref(callParameters->data), callParameters->origin, callParameters->senderAddress);
+            auto precompiledResult = callPrecompiled(precompiledAddress, ref(callParameters->data),
+                callParameters->origin, callParameters->senderAddress);
             auto gas = precompiledResult->m_gas;
             if (callParameters->gas < gas)
             {
@@ -286,7 +285,7 @@ CallParameters::UniquePtr TransactionExecutive::go(HostContext& hostContext)
                                   const HostContext& hostContext) -> evmc_message {
             // the block number will be larger than 0,
             // can be controlled by the programmers
-            assert(blockContext.currentNumber() > 0);
+            assert(blockContext.number() > 0);
 
             evmc_call_kind kind = hostContext.isCreate() ? EVMC_CREATE : EVMC_CALL;
             uint32_t flags = hostContext.staticCall() ? EVMC_STATIC : 0;
@@ -392,7 +391,7 @@ CallParameters::UniquePtr TransactionExecutive::go(HostContext& hostContext)
             auto code = hostContext.code();
             if (code.empty())
             {
-                BOOST_THROW_EXCEPTION(BCOS_ERROR(-1, "Code not found!"));
+                BOOST_THROW_EXCEPTION(BCOS_ERROR(-1, "Code not found! " + m_contractAddress));
             }
 
             auto vmKind = VMKind::evmone;
@@ -583,7 +582,8 @@ void TransactionExecutive::setConstantPrecompiled(
 {
     m_constantPrecompiled.insert(std::make_pair(address, precompiled));
 }
-void TransactionExecutive::setConstantPrecompiled(std::map<std::string, std::shared_ptr<precompiled::Precompiled>> _constantPrecompiled)
+void TransactionExecutive::setConstantPrecompiled(
+    std::map<std::string, std::shared_ptr<precompiled::Precompiled>> _constantPrecompiled)
 {
     m_constantPrecompiled = std::move(_constantPrecompiled);
 }

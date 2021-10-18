@@ -27,6 +27,7 @@
 #include "bcos-framework/interfaces/protocol/Transaction.h"
 #include "bcos-framework/interfaces/storage/Table.h"
 #include "bcos-framework/libstorage/StateStorage.h"
+#include "interfaces/protocol/ProtocolTypeDef.h"
 #include <tbb/concurrent_unordered_map.h>
 #include <atomic>
 #include <functional>
@@ -36,7 +37,6 @@
 
 namespace bcos
 {
-
 namespace executor
 {
 class TransactionExecutive;
@@ -46,13 +46,13 @@ class BlockContext : public std::enable_shared_from_this<BlockContext>
 {
 public:
     typedef std::shared_ptr<BlockContext> Ptr;
-    // using ParallelConfigCache = tbb::concurrent_map<std::pair<std::string, uint32_t>,
-    //     std::shared_ptr<bcos::precompiled::ParallelConfig>>;
 
     BlockContext(std::shared_ptr<storage::StateStorage> storage, crypto::Hash::Ptr _hashImpl,
-        protocol::BlockHeader::ConstPtr _current,
-        protocol::ExecutionMessageFactory::Ptr _executionResultFactory,
-        const EVMSchedule& _schedule, bool _isWasm);
+        bcos::protocol::BlockNumber blockNumber, h256 blockHash, uint64_t timestamp,
+        int32_t blockVersion, const EVMSchedule& _schedule, bool _isWasm);
+
+    BlockContext(std::shared_ptr<storage::StateStorage> storage, crypto::Hash::Ptr _hashImpl,
+        protocol::BlockHeader::ConstPtr _current, const EVMSchedule& _schedule, bool _isWasm);
 
     using getTxCriticalsHandler = std::function<std::shared_ptr<std::vector<std::string>>(
         const protocol::Transaction::ConstPtr& _tx)>;
@@ -64,28 +64,23 @@ public:
     void setTxGasLimit(uint64_t _txGasLimit) { m_txGasLimit = _txGasLimit; }
 
     // Get transaction criticals, return nullptr if critical to all
-    std::shared_ptr<std::vector<std::string>> getTxCriticals(
-        const protocol::Transaction::ConstPtr& _tx)
-    {
-        return m_getTxCriticals(_tx);
-    }
-    void setTxCriticalsHandler(getTxCriticalsHandler _handler) { m_getTxCriticals = _handler; }
+    // std::shared_ptr<std::vector<std::string>> getTxCriticals(
+    //     const protocol::Transaction::ConstPtr& _tx)
+    // {
+    //     return m_getTxCriticals(_tx);
+    // }
+    // void setTxCriticalsHandler(getTxCriticalsHandler _handler) { m_getTxCriticals = _handler; }
+    
+    auto getTxCriticals(const protocol::Transaction::ConstPtr& _tx)
+        -> std::shared_ptr<std::vector<std::string>>;
+
     crypto::Hash::Ptr hashHandler() const { return m_hashImpl; }
     bool isWasm() const { return m_isWasm; }
-    /// @return block number
-    int64_t currentNumber() const { return m_currentHeader->number(); }
-
-    /// @return timestamp
-    uint64_t timestamp() const
-    {  // FIXME: update framework when timestamp() of
-       // blockheader is const
-        auto header = const_cast<protocol::BlockHeader*>(m_currentHeader.get());
-        return header->timestamp();
-    }
-    int32_t blockVersion() const { return m_currentHeader->version(); }
-    /// @return gasLimit of the block header
+    int64_t number() const { return m_blockNumber; }
+    h256 hash() const { return m_blockHash; }
+    uint64_t timestamp() const { return m_timeStamp; }
+    int32_t blockVersion() const { return m_blockVersion; }
     u256 const& gasLimit() const { return m_gasLimit; }
-    protocol::BlockHeader::ConstPtr currentBlockHeader() { return m_currentHeader; }
 
     EVMSchedule const& evmSchedule() const { return m_schedule; }
 
@@ -104,7 +99,6 @@ public:
     void clear() { m_executives.clear(); }
 
 private:
-
     struct HashCombine
     {
         size_t operator()(const std::tuple<int64_t, int64_t>& val) const
@@ -130,14 +124,17 @@ private:
         HashCombine>
         m_executives;
 
-    protocol::BlockHeader::ConstPtr m_currentHeader;
-    protocol::ExecutionMessageFactory::Ptr m_executionMessageFactory;
+    bcos::protocol::BlockNumber m_blockNumber;
+    h256 m_blockHash;
+    uint64_t m_timeStamp;
+    int32_t m_blockVersion;
+
     EVMSchedule m_schedule;
     u256 m_gasLimit;
     bool m_isWasm = false;
 
     uint64_t m_txGasLimit = 300000000;
-    getTxCriticalsHandler m_getTxCriticals = nullptr;
+    // getTxCriticalsHandler m_getTxCriticals = nullptr;
     std::shared_ptr<storage::StateStorage> m_storage;
 
     // map between {receiveAddress, selector} to {ParallelConfig}
