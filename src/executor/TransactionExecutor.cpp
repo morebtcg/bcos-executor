@@ -456,9 +456,10 @@ void TransactionExecutor::executeTransaction(bcos::protocol::ExecutionMessage::U
     std::function<void(bcos::Error::UniquePtr, bcos::protocol::ExecutionMessage::UniquePtr)>
         callback)
 {
-    EXECUTOR_LOG(DEBUG) << "ExecuteTransaction request" << LOG_KV("ContextID", input->contextID())
-                        << LOG_KV("seq", input->seq()) << LOG_KV("Message type", input->type())
-                        << LOG_KV("To", input->to()) << LOG_KV("Create", input->create());
+    // EXECUTOR_LOG(DEBUG) << "ExecuteTransaction request" << LOG_KV("ContextID",
+    // input->contextID())
+    //                     << LOG_KV("seq", input->seq()) << LOG_KV("Message type", input->type())
+    //                     << LOG_KV("To", input->to()) << LOG_KV("Create", input->create());
 
     if (!m_blockContext)
     {
@@ -480,7 +481,7 @@ void TransactionExecutor::executeTransaction(bcos::protocol::ExecutionMessage::U
                 return;
             }
 
-            EXECUTOR_LOG(DEBUG) << "ExecuteTransaction success";
+            // EXECUTOR_LOG(DEBUG) << "ExecuteTransaction success";
             callback(std::move(error), std::move(result));
         });
 }
@@ -727,7 +728,7 @@ void TransactionExecutor::asyncExecute(std::shared_ptr<BlockContext> blockContex
                 auto executive =
                     createExecutive(blockContext, callParameters->codeAddress, contextID, seq);
 
-                blockContext->insertExecutive(contextID, seq, {executive, callback});
+                blockContext->insertExecutive(contextID, seq, {executive, callback, {}});
 
                 try
                 {
@@ -754,7 +755,7 @@ void TransactionExecutor::asyncExecute(std::shared_ptr<BlockContext> blockContex
         {
             // REVERT or FINISHED
             [[maybe_unused]] auto& [executive, externalCallFunc, responseFunc] = *it;
-            externalCallFunc = std::move(callback);
+            it->requestFunction = std::move(callback);
 
             // Call callback
             EXECUTOR_LOG(TRACE) << "Entering responseFunc";
@@ -767,7 +768,7 @@ void TransactionExecutor::asyncExecute(std::shared_ptr<BlockContext> blockContex
             auto executive =
                 createExecutive(blockContext, callParameters->codeAddress, contextID, seq);
 
-            blockContext->insertExecutive(contextID, seq, {executive, callback});
+            blockContext->insertExecutive(contextID, seq, {executive, callback, {}});
 
             try
             {
@@ -922,10 +923,9 @@ void TransactionExecutor::externalCall(std::shared_ptr<BlockContext> blockContex
                 "," + boost::lexical_cast<std::string>(executive->seq())));
     }
 
-    // TODO: Use struct
     if (callback)
     {
-        std::get<2>(*it) = std::move(callback);
+        it->responseFunction = std::move(callback);
     }
 
     auto message = m_executionMessageFactory->createExecutionMessage();
@@ -937,7 +937,10 @@ void TransactionExecutor::externalCall(std::shared_ptr<BlockContext> blockContex
         message->setType(ExecutionMessage::MESSAGE);
         break;
     case CallParameters::WAIT_KEY:
+        message->setFrom(std::move(params->senderAddress));
         message->setType(ExecutionMessage::WAIT_KEY);
+        message->setKeyLockAcquired(std::move(params->acquireKeyLock));
+
         break;
     case CallParameters::FINISHED:
         // Response message, Swap the from and to
@@ -972,7 +975,9 @@ void TransactionExecutor::externalCall(std::shared_ptr<BlockContext> blockContex
     message->setLogEntries(std::move(params->logEntries));
     message->setNewEVMContractAddress(std::move(params->newEVMContractAddress));
 
-    std::get<1> (*it)(nullptr, std::move(message));
+    message->setKeyLocks(std::move(params->keyLocks));
+
+    it->requestFunction(nullptr, std::move(message));
 }
 
 BlockContext::Ptr TransactionExecutor::createBlockContext(
@@ -1144,11 +1149,12 @@ std::unique_ptr<CallParameters> TransactionExecutor::createCallParameters(
     callParameters->codeAddress = input.to();
     callParameters->create = input.create();
     callParameters->gas = input.gasAvailable();
-    callParameters->data = std::move(input.takeData());
+    callParameters->data = input.takeData();
     callParameters->staticCall = staticCall;
     callParameters->create = input.create();
     callParameters->newEVMContractAddress = input.newEVMContractAddress();
     callParameters->status = 0;
+    callParameters->keyLocks = input.takeKeyLocks();
 
     return callParameters;
 }

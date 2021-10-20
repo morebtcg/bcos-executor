@@ -503,11 +503,13 @@ BOOST_AUTO_TEST_CASE(externalCall)
     BOOST_CHECK_EQUAL(result4->seq(), 1001);
     BOOST_CHECK_EQUAL(result4->from(), std::string(address));
     BOOST_CHECK_EQUAL(result4->to(), boost::algorithm::to_lower_copy(std::string(addressString2)));
+    BOOST_CHECK_GT(result4->keyLocks().size(), 1);
 
     // Request message without status
     // BOOST_CHECK_EQUAL(result4->status(), 0);
     BOOST_CHECK(result4->message().empty());
     BOOST_CHECK(result4->newEVMContractAddress().empty());
+    BOOST_CHECK_GT(result4->keyLocks().size(), 0);
 
     // --------------------------------
     // Message 3: A call B's value(), set new seq 1003
@@ -816,6 +818,10 @@ BOOST_AUTO_TEST_CASE(performance)
 
     std::cout << "Check elapsed: " << (std::chrono::system_clock::now() - now).count() / 1000 / 1000
               << std::endl;
+}
+
+BOOST_AUTO_TEST_CASE(keyLock) {
+    
 }
 
 BOOST_AUTO_TEST_SUITE_END()
