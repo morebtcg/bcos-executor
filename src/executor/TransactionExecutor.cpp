@@ -58,6 +58,8 @@
 #include <tbb/parallel_for.h>
 #include <boost/algorithm/hex.hpp>
 #include <boost/exception/detail/exception_ptr.hpp>
+#include <boost/format.hpp>
+#include <boost/format/format_fwd.hpp>
 #include <boost/lexical_cast.hpp>
 #include <boost/thread/latch.hpp>
 #include <boost/throw_exception.hpp>
@@ -96,7 +98,6 @@ TransactionExecutor::TransactionExecutor(txpool::TxPoolInterface::Ptr txpool,
 {
     assert(m_backendStorage);
 
-    m_lastUncommittedIterator = m_stateStorages.begin();
     initPrecompiled();
     assert(m_precompiledContract);
     assert(m_constantPrecompiled.size() > 0);
@@ -129,19 +130,23 @@ void TransactionExecutor::nextBlockHeader(const bcos::protocol::BlockHeader::Con
             }
             else
             {
-                auto prev = m_stateStorages.back();
+                auto& prev = m_stateStorages.back();
+
+                if (blockHeader->number() - prev.number != 1)
+                {
+                    auto fmt =
+                        boost::format("Block number mismatch! request: %d - 1, current: %d") %
+                        blockHeader->number() % prev.number;
+                    EXECUTOR_LOG(ERROR) << fmt;
+                    callback(BCOS_ERROR_UNIQUE_PTR(ExecuteError::EXECUTE_ERROR, fmt.str()));
+                    return;
+                }
+
                 stateStorage = std::make_shared<bcos::storage::StateStorage>(prev.storage);
             }
 
-
             m_blockContext = createBlockContext(blockHeader, stateStorage);
-            m_stateStorages.emplace_back(State{blockHeader->number(), std::move(stateStorage)});
-
-            if (m_lastUncommittedIterator == m_stateStorages.end())
-            {
-                m_lastUncommittedIterator = m_stateStorages.cend();
-                --m_lastUncommittedIterator;
-            }
+            m_stateStorages.emplace_back(blockHeader->number(), stateStorage);
         }
 
         EXECUTOR_LOG(INFO) << "NextBlockHeader success";
@@ -612,22 +617,16 @@ void TransactionExecutor::call(bcos::protocol::ExecutionMessage::UniquePtr input
     {
     case protocol::ExecutionMessage::MESSAGE:
     {
+        bcos::protocol::BlockNumber number = m_lastCommitedBlockNumber;
         storage::StorageInterface::Ptr prev;
-        bcos::protocol::BlockNumber number;
-        {
-            std::shared_lock<std::shared_mutex> lock(m_stateStoragesMutex);
 
-            if (m_stateStorages.empty())
-            {
-                prev = m_backendStorage;
-                number = m_lastCommitedBlockNumber;
-            }
-            else
-            {
-                auto& state = m_stateStorages.back();
-                prev = state.storage;
-                number = state.number;
-            }
+        if (m_cachedStorage)
+        {
+            prev = m_cachedStorage;
+        }
+        else
+        {
+            prev = m_backendStorage;
         }
 
         // Create a temp storage
@@ -764,7 +763,7 @@ void TransactionExecutor::getHash(bcos::protocol::BlockNumber number,
         return;
     }
 
-    auto last = m_stateStorages.back();
+    auto& last = m_stateStorages.back();
     if (last.number != number)
     {
         auto errorMessage =
@@ -789,15 +788,9 @@ void TransactionExecutor::prepare(
     const TwoPCParams& params, std::function<void(bcos::Error::Ptr)> callback)
 {
     EXECUTOR_LOG(INFO) << "Prepare request" << LOG_KV("params", params.number);
-    if (m_stateStorages.empty())
-    {
-        EXECUTOR_LOG(ERROR) << "Prepare error: No uncommitted state in executor";
-        callback(BCOS_ERROR_PTR(-1, "No uncommitted state in executor"));
-        return;
-    }
 
-    auto last = m_lastUncommittedIterator;
-    if (last == m_stateStorages.end())
+    auto first = m_stateStorages.begin();
+    if (first == m_stateStorages.end())
     {
         auto errorMessage = "Prepare error: empty stateStorages";
         EXECUTOR_LOG(ERROR) << errorMessage;
@@ -806,12 +799,12 @@ void TransactionExecutor::prepare(
         return;
     }
 
-    if (last->number != params.number)
+    if (first->number != params.number)
     {
         auto errorMessage =
             "Prepare error: Request block number: " +
             boost::lexical_cast<std::string>(params.number) +
-            " not equal to last blockNumber: " + boost::lexical_cast<std::string>(last->number);
+            " not equal to last blockNumber: " + boost::lexical_cast<std::string>(first->number);
 
         EXECUTOR_LOG(ERROR) << errorMessage;
         callback(BCOS_ERROR_PTR(ExecuteError::PREPARE_ERROR, errorMessage));
@@ -824,7 +817,7 @@ void TransactionExecutor::prepare(
     storageParams.number = params.number;
 
     m_backendStorage->asyncPrepare(
-        storageParams, last->storage, [callback = std::move(callback)](auto&& error, uint64_t) {
+        storageParams, first->storage, [callback = std::move(callback)](auto&& error, uint64_t) {
             if (error)
             {
                 auto errorMessage = "Prepare error: " + boost::diagnostic_information(*error);
@@ -845,23 +838,25 @@ void TransactionExecutor::commit(
 {
     EXECUTOR_LOG(DEBUG) << "Commit request" << LOG_KV("number", params.number);
 
-    if (m_lastUncommittedIterator == m_stateStorages.end())
+    auto first = m_stateStorages.begin();
+    if (first == m_stateStorages.end())
     {
-        EXECUTOR_LOG(ERROR) << "Commit error: No uncommited state in executor";
-        callback(BCOS_ERROR_PTR(ExecuteError::COMMIT_ERROR, "No uncommited state in executor"));
+        auto errorMessage = "Commit error: empty stateStorages";
+        EXECUTOR_LOG(ERROR) << errorMessage;
+        callback(BCOS_ERROR_PTR(INVALID_BLOCKNUMBER, errorMessage));
+
         return;
     }
 
-    auto last = *m_lastUncommittedIterator;
-    if (last.number != params.number)
+    if (first->number != params.number)
     {
         auto errorMessage =
             "Commit error: Request block number: " +
             boost::lexical_cast<std::string>(params.number) +
-            " not equal to last blockNumber: " + boost::lexical_cast<std::string>(last.number);
+            " not equal to last blockNumber: " + boost::lexical_cast<std::string>(first->number);
 
         EXECUTOR_LOG(ERROR) << errorMessage;
-        callback(BCOS_ERROR_PTR(-1, errorMessage));
+        callback(BCOS_ERROR_PTR(INVALID_BLOCKNUMBER, errorMessage));
 
         return;
     }
@@ -882,10 +877,9 @@ void TransactionExecutor::commit(
 
             EXECUTOR_LOG(DEBUG) << "Commit success";
 
-            ++m_lastUncommittedIterator;
             m_lastCommitedBlockNumber = blockNumber;
 
-            checkAndClear();
+            removeCommittedState();
 
             callback(nullptr);
         });
@@ -896,20 +890,22 @@ void TransactionExecutor::rollback(
 {
     EXECUTOR_LOG(INFO) << "Rollback request: " << LOG_KV("number", params.number);
 
-    if (m_lastUncommittedIterator == m_stateStorages.end())
+    auto first = m_stateStorages.begin();
+    if (first == m_stateStorages.end())
     {
-        EXECUTOR_LOG(ERROR) << "Rollback error: No uncommited state in executor";
-        callback(BCOS_ERROR_PTR(ExecuteError::ROLLBACK_ERROR, "No uncommited state in executor"));
+        auto errorMessage = "Rollback error: empty stateStorages";
+        EXECUTOR_LOG(ERROR) << errorMessage;
+        callback(BCOS_ERROR_PTR(-1, errorMessage));
+
         return;
     }
 
-    auto last = *m_lastUncommittedIterator;
-    if (last.number != params.number)
+    if (first->number != params.number)
     {
         auto errorMessage =
             "Rollback error: Request block number: " +
             boost::lexical_cast<std::string>(params.number) +
-            " not equal to last blockNumber: " + boost::lexical_cast<std::string>(last.number);
+            " not equal to last blockNumber: " + boost::lexical_cast<std::string>(first->number);
 
         EXECUTOR_LOG(ERROR) << errorMessage;
         callback(BCOS_ERROR_PTR(ExecuteError::ROLLBACK_ERROR, errorMessage));
@@ -937,7 +933,6 @@ void TransactionExecutor::rollback(
 void TransactionExecutor::reset(std::function<void(bcos::Error::Ptr)> callback)
 {
     m_stateStorages.clear();
-    m_lastUncommittedIterator = m_stateStorages.end();
 
     callback(nullptr);
 }
@@ -1413,35 +1408,47 @@ void TransactionExecutor::initPrecompiled()
     }
 }
 
-void TransactionExecutor::checkAndClear()
+void TransactionExecutor::removeCommittedState()
 {
-    std::unique_lock<std::shared_mutex> lock(m_stateStoragesMutex);
-
     if (m_stateStorages.empty())
     {
+        EXECUTOR_LOG(ERROR) << "Remove committed state failed, empty states";
         return;
     }
 
-    auto it = m_stateStorages.begin();
+    bcos::protocol::BlockNumber number;
+    bcos::storage::StateStorage::Ptr storage;
 
-    if (it != m_lastUncommittedIterator)
     {
-        if (m_cachedStorage)
+        std::unique_lock<std::shared_mutex> lock(m_stateStoragesMutex);
+        auto it = m_stateStorages.begin();
+        number = it->number;
+        storage = it->storage;
+    }
+
+    if (m_cachedStorage)
+    {
+        EXECUTOR_LOG(INFO) << "Merge state number: " << number << " to cachedStorage start";
+        m_cachedStorage->merge(true, *storage);
+        EXECUTOR_LOG(INFO) << "Merge state number: " << number << " to cachedStorage end";
+
+        std::unique_lock<std::shared_mutex> lock(m_stateStoragesMutex);
+        auto it = m_stateStorages.begin();
+        it = m_stateStorages.erase(it);
+        if (it != m_stateStorages.end())
         {
-            m_cachedStorage->merge(true, *(it->storage));
-            it = m_stateStorages.erase(it);
-            if (it != m_stateStorages.end())
-            {
-                it->storage->setPrev(m_cachedStorage);
-            }
+            EXECUTOR_LOG(INFO) << "Set state number: " << it->number << " prev to cachedStorage";
+            it->storage->setPrev(m_cachedStorage);
         }
-        else
+    }
+    else if (m_backendStorage)
+    {
+        std::unique_lock<std::shared_mutex> lock(m_stateStoragesMutex);
+        auto it = m_stateStorages.begin();
+        it = m_stateStorages.erase(it);
+        if (it != m_stateStorages.end())
         {
-            it = m_stateStorages.erase(it);
-            if (it != m_stateStorages.end())
-            {
-                it->storage->setPrev(m_backendStorage);
-            }
+            it->storage->setPrev(m_backendStorage);
         }
     }
 }

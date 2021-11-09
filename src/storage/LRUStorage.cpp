@@ -1,5 +1,7 @@
-#include "LRUStorage.h"
+#include "bcos-executor/LRUStorage.h"
 #include "../Common.h"
+#include "libstorage/StateStorage.h"
+#include <boost/format.hpp>
 #include <boost/iterator/zip_iterator.hpp>
 #include <algorithm>
 #include <thread>
@@ -19,9 +21,9 @@ void LRUStorage::asyncGetRow(const std::string_view& table, const std::string_vi
     storage::StateStorage::asyncGetRow(table, _key,
         [this, callback = std::move(_callback), table, key = _key](
             Error::UniquePtr error, std::optional<bcos::storage::Entry> entry) {
-            if (!error)
+            if (!error && entry)
             {
-                updateMRU(EntryKeyWrapper(table, std::string(key), entry->capacityOfHashField()));
+                updateMRU(EntryKeyWrapper(table, std::string(key)));
             }
             callback(std::move(error), std::move(entry));
         });
@@ -57,7 +59,7 @@ void LRUStorage::asyncGetRows(const std::string_view& table,
 
                     if (entry)
                     {
-                        updateMRU(EntryKeyWrapper(table, key, entry->capacityOfHashField()));
+                        updateMRU(EntryKeyWrapper(table, key));
                     }
                 }
             }
@@ -69,7 +71,7 @@ void LRUStorage::asyncGetRows(const std::string_view& table,
 void LRUStorage::asyncSetRow(const std::string_view& table, const std::string_view& key,
     bcos::storage::Entry entry, std::function<void(Error::UniquePtr)> callback)
 {
-    updateMRU(EntryKeyWrapper(table, std::string(key), entry.capacityOfHashField()));
+    updateMRU(EntryKeyWrapper(table, std::string(key)));
     storage::StateStorage::asyncSetRow(table, key, std::move(entry), std::move(callback));
 }
 
@@ -85,6 +87,7 @@ void LRUStorage::merge(bool onlyDirty, const TraverseStorageInterface& source)
 
 void LRUStorage::start()
 {
+    EXECUTOR_LOG(TRACE) << "Starting thread";
     m_running = true;
     m_worker = std::make_unique<std::thread>([self = shared_from_this()]() { self->startLoop(); });
 }
@@ -93,6 +96,7 @@ void LRUStorage::stop()
 {
     if (m_running)
     {
+        EXECUTOR_LOG(TRACE) << "Stoping thread";
         m_running = false;
 
         m_mruQueue.emplace(EntryKeyWrapper());
@@ -107,7 +111,6 @@ void LRUStorage::startLoop()
         EntryKeyWrapper entryKey;
         if (m_mruQueue.try_pop(entryKey))
         {
-            EXECUTOR_LOG(TRACE) << "Pop key: " << entryKey.table() << " " << entryKey.key() << " " << entryKey.capacity;
             // Check if stopped
             if (entryKey.isStop())
             {
@@ -116,38 +119,41 @@ void LRUStorage::startLoop()
 
             // Push item to mru
             auto result = m_mru.emplace_back(std::move(entryKey));
-            if (result.second)
-            {
-                m_capacity += entryKey.capacity;
-            }
-            else
+            if (!result.second)
             {
                 m_mru.relocate(m_mru.end(), result.first);
             }
 
-            // Check if out of capacity
-            EXECUTOR_LOG(TRACE) << "capacity: " << m_capacity << " max_capacity: " << m_maxCapacity;
-            if (m_capacity > m_maxCapacity)
+            if (storage::StateStorage::capacity() > m_maxCapacity)
             {
+                size_t clearedCount = 0;
+                size_t clearedCapacity = 0;
                 // Clear the out date items
-                while (m_capacity > m_maxCapacity)
+                while (storage::StateStorage::capacity() > m_maxCapacity && !m_mru.empty())
                 {
+                    auto currentCapacity = storage::StateStorage::capacity();
                     auto& item = m_mru.front();
 
                     bcos::storage::Entry entry;
-                    entry.setStatus(bcos::storage::Entry::DELETED);
+                    entry.setStatus(bcos::storage::Entry::PURGED);
 
                     storage::StateStorage::asyncSetRow(
                         item.table(), item.key(), std::move(entry), [](Error::UniquePtr) {});
 
+                    ++clearedCount;
+                    clearedCapacity += currentCapacity - storage::StateStorage::capacity();
+
                     m_mru.pop_front();
                 }
+
+                STORAGE_LOG(DEBUG) << boost::format("LRUStorage clear %lu keys, %lu bytes") %
+                                          clearedCount % clearedCapacity;
             }
         }
         else
         {
             using namespace std::chrono_literals;
-            std::this_thread::sleep_for(200ms);
+            std::this_thread::sleep_for(200ms);  // TODO: 200ms is enough?
         }
     }
 }
