@@ -24,6 +24,9 @@
 #include "Common.h"
 #include <bcos-framework/interfaces/storage/Common.h>
 #include <bcos-framework/interfaces/storage/Table.h>
+#include <bcos-framework/libtool/ConsensusNode.h>
+#include <boost/core/ignore_unused.hpp>
+
 namespace bcos
 {
 namespace precompiled
@@ -48,23 +51,22 @@ public:
         const std::string& _origin, const std::string& _sender) override;
 
 private:
-    int addSealer(
-        const std::shared_ptr<executor::TransactionExecutive>& _executive, bytesConstRef& _data);
+    int addSealer(const std::shared_ptr<executor::TransactionExecutive>& _executive,
+        bytesConstRef& _data, const PrecompiledCodec& codec);
 
-    int addObserver(
-        const std::shared_ptr<executor::TransactionExecutive>& _executive, bytesConstRef& _data);
+    int addObserver(const std::shared_ptr<executor::TransactionExecutive>& _executive,
+        bytesConstRef& _data, const PrecompiledCodec& codec);
 
-    int removeNode(
-        const std::shared_ptr<executor::TransactionExecutive>& _executive, bytesConstRef& _data);
+    int removeNode(const std::shared_ptr<executor::TransactionExecutive>& _executive,
+        bytesConstRef& _data, const PrecompiledCodec& codec);
 
-    int setWeight(
-        const std::shared_ptr<executor::TransactionExecutive>& _executive, bytesConstRef& _data);
+    int setWeight(const std::shared_ptr<executor::TransactionExecutive>& _executive,
+        bytesConstRef& _data, const PrecompiledCodec& codec);
 
 private:
     void showConsensusTable(const std::shared_ptr<executor::TransactionExecutive>& _executive);
-    bool checkIsLastSealer(std::optional<bcos::storage::Table> table, std::string const& nodeID);
-    std::shared_ptr<std::map<std::string, std::optional<storage::Entry>>> getRowsByNodeType(
-        std::optional<bcos::storage::Table> _table, std::string const& _nodeType);
+
+    void checkTable(executor::TransactionExecutive& executive);
 };
 }  // namespace precompiled
 }  // namespace bcos
