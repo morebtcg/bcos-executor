@@ -203,7 +203,7 @@ void TransactionExecutor::dagExecuteTransactions(
                 }
                 case ExecutionMessage::MESSAGE:
                 {
-                    callParametersList->at(i) = createCallParameters(std::move(*params), false);
+                    callParametersList->at(i) = createCallParameters(*params, false);
                     break;
                 }
                 default:
@@ -236,8 +236,8 @@ void TransactionExecutor::dagExecuteTransactions(
 
                 for (size_t i = 0; i < transactions->size(); ++i)
                 {
-                    callParametersList->at(indexes[i]) = createCallParameters(
-                        std::move(*fillInputs->at(i)), std::move(*transactions->at(i)));
+                    callParametersList->at(indexes[i]) =
+                        createCallParameters(*fillInputs->at(i), std::move(*transactions->at(i)));
                 }
 
                 if (m_isWasm)
@@ -290,10 +290,10 @@ void TransactionExecutor::dagExecuteTransactionsForEvm(gsl::span<CallParameters:
 
     shared_ptr<TxDAG> txDag = make_shared<TxDAG>();
     txDag->init(transactionsNum, txsCriticals);
-    boost::latch counter(transactionsNum - serialTransactionsNum);
 
     vector<TransactionExecutive::Ptr> allExecutives(transactionsNum);
     vector<std::unique_ptr<CallParameters>> allCallParameters(transactionsNum);
+    std::vector<gsl::index> allIndex(transactionsNum);
 
     for (gsl::index i = 0; i < transactionsNum; ++i)
     {
@@ -307,54 +307,32 @@ void TransactionExecutor::dagExecuteTransactionsForEvm(gsl::span<CallParameters:
         auto seq = input->seq;
 
         auto executive = createExecutive(m_blockContext, input->codeAddress, contextID, seq);
-        m_blockContext->insertExecutive(contextID, seq,
-            {executive,
-                [this, i, &executionResults, &counter](bcos::Error::UniquePtr&& error,
-                    bcos::protocol::ExecutionMessage::UniquePtr&& response) {
-                    if (response->status() != 0 || error)
-                    {
-                        EXECUTOR_LOG(DEBUG) << "Transaction reverted: " << response->status();
-                        executionResults[i]->setType(ExecutionMessage::REVERT);
-                    }
-                    else
-                    {
-                        EXECUTOR_LOG(DEBUG) << "Transaction executed";
-                        executionResults[i] = m_executionMessageFactory->createExecutionMessage();
-                        executionResults[i]->setNewEVMContractAddress(
-                            std::string(response->newEVMContractAddress()));
-                        executionResults[i]->setLogEntries(response->takeLogEntries());
-                        executionResults[i]->setStatus(response->status());
-                        executionResults[i]->setMessage(std::string(response->message()));
-                        executionResults[i]->setType(ExecutionMessage::FINISHED);
-                        executionResults[i]->setData(response->takeData());
-                        executionResults[i]->setTransactionHash(response->transactionHash());
-                        executionResults[i]->setFrom(string(response->from()));
-                        executionResults[i]->setTo(string(response->to()));
-                        executionResults[i]->setGasAvailable(response->gasAvailable());
-                    }
-                    counter.count_down();
-                },
-                {}});
+
+        m_blockContext->insertExecutive(contextID, seq, {executive});
 
         allExecutives[i].swap(executive);
         allCallParameters[i].swap(input);
+        allIndex[i] = i;
     }
 
-    txDag->setTxExecuteFunc([](bcos::executor::TransactionExecutive::Ptr executive,
-                                CallParameters::UniquePtr callParameters) {
-        EXECUTOR_LOG(TRACE) << LOG_BADGE("dagExecuteTransactionsForEvm")
-                            << LOG_DESC("Start transaction")
-                            << LOG_KV("to", callParameters->receiveAddress)
-                            << LOG_KV("data", toHexStringWithPrefix(callParameters->data));
-        try
-        {
-            executive->start(std::move(callParameters));
-        }
-        catch (std::exception& e)
-        {
-            EXECUTOR_LOG(ERROR) << "Execute error: " << boost::diagnostic_information(e);
-        }
-    });
+    txDag->setTxExecuteFunc(
+        [this, &executionResults](bcos::executor::TransactionExecutive::Ptr executive,
+            CallParameters::UniquePtr callParameters, gsl::index index) {
+            EXECUTOR_LOG(TRACE) << LOG_BADGE("dagExecuteTransactionsForEvm")
+                                << LOG_DESC("Start transaction")
+                                << LOG_KV("to", callParameters->receiveAddress)
+                                << LOG_KV("data", toHexStringWithPrefix(callParameters->data));
+            try
+            {
+                auto output = executive->start(std::move(callParameters));
+
+                executionResults[index] = toExecutionResult(*executive, std::move(output));
+            }
+            catch (std::exception& e)
+            {
+                EXECUTOR_LOG(ERROR) << "Execute error: " << boost::diagnostic_information(e);
+            }
+        });
 
     auto parallelTimeOut = utcSteadyTime() + 30000;  // 30 timeout
     try
@@ -374,7 +352,7 @@ void TransactionExecutor::dagExecuteTransactionsForEvm(gsl::span<CallParameters:
                                               // << LOG_KV("txNum", transactions->size())
                                               << LOG_KV("blockNumber", m_blockContext->number());
                     }
-                    txDag->executeUnit(allExecutives, allCallParameters);
+                    txDag->executeUnit(allExecutives, allCallParameters, allIndex);
                 }
             });
     }
@@ -388,7 +366,6 @@ void TransactionExecutor::dagExecuteTransactionsForEvm(gsl::span<CallParameters:
         return;
     }
 
-    counter.wait();
     callback(nullptr, std::move(executionResults));
 }
 
@@ -515,8 +492,6 @@ void TransactionExecutor::dagExecuteTransactionsForWasm(
     auto dependencies = unordered_map<bytes, vector<size_t>, boost::hash<bytes>>();
     auto slotUsage = unordered_map<size_t, size_t>();
 
-    boost::latch counter(allConflictFields.size());
-
     for (auto i = 0u; i < allConflictFields.size(); ++i)
     {
         auto& conflictFields = allConflictFields[i];
@@ -524,7 +499,6 @@ void TransactionExecutor::dagExecuteTransactionsForWasm(
         {
             // Transactions those invokes method which can't be executed concurrently
             // will be sent back.
-            counter.count_down();
             continue;
         }
 
@@ -533,42 +507,17 @@ void TransactionExecutor::dagExecuteTransactionsForWasm(
         auto seq = input->seq;
 
         auto executive = createExecutive(m_blockContext, input->receiveAddress, contextID, seq);
-        m_blockContext->insertExecutive(contextID, seq,
-            {executive,
-                [i, &executionResults, &counter](bcos::Error::UniquePtr&& error,
-                    bcos::protocol::ExecutionMessage::UniquePtr&& response) {
-                    if (response->status() != 0 || error)
-                    {
-                        EXECUTOR_LOG(DEBUG) << "Transaction reverted" << response->status();
-                        executionResults[i]->setType(ExecutionMessage::REVERT);
-                    }
-                    else
-                    {
-                        EXECUTOR_LOG(DEBUG) << "Transaction executed";
-                        executionResults[i]->setNewEVMContractAddress(
-                            std::string(response->newEVMContractAddress()));
-                        executionResults[i]->setLogEntries(response->takeLogEntries());
-                        executionResults[i]->setStatus(response->status());
-                        executionResults[i]->setMessage(std::string(response->message()));
-                        executionResults[i]->setType(ExecutionMessage::FINISHED);
-                        executionResults[i]->setData(response->takeData());
-                        executionResults[i]->setTransactionHash(response->transactionHash());
-                        executionResults[i]->setFrom(string(response->from()));
-                        executionResults[i]->setTo(string(response->to()));
-                        executionResults[i]->setGasAvailable(response->gasAvailable());
-                    }
-                    counter.count_down();
-                },
-                {}});
+        m_blockContext->insertExecutive(contextID, seq, {executive});
 
-        auto task = [i, executive, &inputs, &executionResults](Msg) {
+        auto task = [this, i, executive, &inputs, &executionResults](Msg) {
             EXECUTOR_LOG(TRACE) << LOG_BADGE("dagExecuteTransactionsForWasm")
                                 << LOG_DESC("Start transaction")
                                 << LOG_KV("to", inputs[i]->receiveAddress) << LOG_KV("contextID", i)
                                 << LOG_KV("seq", 0);
             try
             {
-                executive->start(std::move(inputs[i]));
+                auto output = executive->start(std::move(inputs[i]));
+                executionResults[i] = toExecutionResult(*executive, std::move(output));
             }
             catch (std::exception& e)
             {
@@ -653,7 +602,6 @@ void TransactionExecutor::dagExecuteTransactionsForWasm(
 
     start.try_put(continue_msg());
     flowGraph.wait_for_all();
-    counter.wait();
     callback(nullptr, std::move(executionResults));
 }
 
@@ -993,6 +941,8 @@ void TransactionExecutor::asyncExecute(std::shared_ptr<BlockContext> blockContex
     std::function<void(bcos::Error::UniquePtr&&, bcos::protocol::ExecutionMessage::UniquePtr&&)>
         callback)
 {
+    EXECUTOR_LOG(TRACE) << "Import key locks size: " << input->keyLocks().size();
+
     switch (input->type())
     {
     case bcos::protocol::ExecutionMessage::TXHASH:
@@ -1001,11 +951,11 @@ void TransactionExecutor::asyncExecute(std::shared_ptr<BlockContext> blockContex
         auto txHashes = std::make_shared<bcos::crypto::HashList>(1);
         (*txHashes)[0] = (input->transactionHash());
 
-        std::shared_ptr<bcos::protocol::ExecutionMessage> sharedInput(std::move(input));
-
         m_txpool->asyncFillBlock(std::move(txHashes),
-            [this, input = std::move(sharedInput), blockContext = std::move(blockContext),
-                callback](Error::Ptr error, bcos::protocol::TransactionsPtr transactions) {
+            [this, inputPtr = input.release(), blockContext = std::move(blockContext), callback](
+                Error::Ptr error, bcos::protocol::TransactionsPtr transactions) mutable {
+                auto input = std::unique_ptr<bcos::protocol::ExecutionMessage>(inputPtr);
+
                 if (error)
                 {
                     callback(BCOS_ERROR_WITH_PREV_UNIQUE_PTR(ExecuteError::EXECUTE_ERROR,
@@ -1034,16 +984,20 @@ void TransactionExecutor::asyncExecute(std::shared_ptr<BlockContext> blockContex
 
                 auto contextID = input->contextID();
                 auto seq = input->seq();
-                auto callParameters = createCallParameters(std::move(*input), std::move(*tx));
+                auto callParameters = createCallParameters(*input, std::move(*tx));
 
                 auto executive =
                     createExecutive(blockContext, callParameters->codeAddress, contextID, seq);
-
-                blockContext->insertExecutive(contextID, seq, {executive, callback, {}});
+                executive->setInitKeyLocks(input->takeKeyLocks());
+                blockContext->insertExecutive(contextID, seq, {executive});
 
                 try
                 {
-                    executive->start(std::move(callParameters));
+                    auto output = executive->start(std::move(callParameters));
+
+                    auto message = toExecutionResult(*executive, std::move(output));
+                    callback(nullptr, std::move(message));
+                    return;
                 }
                 catch (std::exception& e)
                 {
@@ -1059,18 +1013,23 @@ void TransactionExecutor::asyncExecute(std::shared_ptr<BlockContext> blockContex
     {
         auto contextID = input->contextID();
         auto seq = input->seq();
-        auto callParameters = createCallParameters(std::move(*input), staticCall);
+        auto callParameters = createCallParameters(*input, staticCall);
 
         auto it = blockContext->getExecutive(contextID, seq);
         if (it)
         {
             // REVERT or FINISHED
-            [[maybe_unused]] auto& [executive, externalCallFunc, responseFunc] = *it;
-            it->requestFunction = std::move(callback);
+            auto& [executive] = *it;
 
             // Call callback
             EXECUTOR_LOG(TRACE) << "Entering responseFunc";
-            responseFunc(nullptr, TransactionExecutive::CallMessage(std::move(callParameters)));
+            executive->setExchangeMessage(std::move(callParameters));
+            auto output = executive->resume();
+            auto message = toExecutionResult(*executive, std::move(output));
+
+            callback(nullptr, std::move(message));
+            return;
+
             EXECUTOR_LOG(TRACE) << "Exiting responseFunc";
         }
         else
@@ -1078,12 +1037,17 @@ void TransactionExecutor::asyncExecute(std::shared_ptr<BlockContext> blockContex
             // new external call MESSAGE
             auto executive =
                 createExecutive(blockContext, callParameters->codeAddress, contextID, seq);
+            executive->setInitKeyLocks(input->takeKeyLocks());
 
-            blockContext->insertExecutive(contextID, seq, {executive, callback, {}});
+            blockContext->insertExecutive(contextID, seq, {executive});
 
             try
             {
-                executive->start(std::move(callParameters));
+                auto output = executive->start(std::move(callParameters));
+
+                auto message = toExecutionResult(*executive, std::move(output));
+                callback(nullptr, std::move(message));
+                return;
             }
             catch (std::exception& e)
             {
@@ -1092,6 +1056,37 @@ void TransactionExecutor::asyncExecute(std::shared_ptr<BlockContext> blockContex
             }
         }
 
+        break;
+    }
+    case bcos::protocol::ExecutionMessage::KEY_LOCK:
+    {
+        auto contextID = input->contextID();
+        auto seq = input->seq();
+        auto callParameters = createCallParameters(*input, staticCall);
+
+        auto it = blockContext->getExecutive(contextID, seq);
+        if (it)
+        {
+            // REVERT or FINISHED
+            auto& [executive] = *it;
+
+            executive->setExchangeMessage(std::move(callParameters));
+            auto output = executive->resume();
+
+            auto message = toExecutionResult(*executive, std::move(output));
+
+            callback(nullptr, std::move(message));
+            return;
+        }
+        else
+        {
+            EXECUTOR_LOG(ERROR) << "KEY LOCK not found executive, contextID: " << contextID
+                                << " seq: " << seq;
+            callback(
+                BCOS_ERROR_UNIQUE_PTR(ExecuteError::EXECUTE_ERROR, "KEY LOCK not found executive"),
+                nullptr);
+            return;
+        }
         break;
     }
     default:
@@ -1259,23 +1254,21 @@ optional<ConflictFields> TransactionExecutor::decodeConflictFields(
     return {conflictFields};
 }
 
-void TransactionExecutor::externalCall(std::shared_ptr<BlockContext> blockContext,
-    TransactionExecutive::Ptr executive, std::unique_ptr<CallParameters> params,
-    std::function<void(Error::UniquePtr, std::unique_ptr<CallParameters>)> callback)
+std::function<void(const TransactionExecutive& executive, std::unique_ptr<CallParameters> input)>
+TransactionExecutor::createExternalFunctionCall(
+    std::function<void(bcos::Error::UniquePtr&&, bcos::protocol::ExecutionMessage::UniquePtr&&)>&
+        callback)
 {
-    auto it = blockContext->getExecutive(executive->contextID(), executive->seq());
-    if (!it)
-    {
-        BOOST_THROW_EXCEPTION(BCOS_ERROR(-1,
-            "Can't find executive: " + boost::lexical_cast<std::string>(executive->contextID()) +
-                "," + boost::lexical_cast<std::string>(executive->seq())));
-    }
+    return
+        [this, &callback](const TransactionExecutive& executive, CallParameters::UniquePtr input) {
+            auto message = toExecutionResult(executive, std::move(input));
+            callback(nullptr, std::move(message));
+        };
+}
 
-    if (callback)
-    {
-        it->responseFunction = std::move(callback);
-    }
-
+std::unique_ptr<ExecutionMessage> TransactionExecutor::toExecutionResult(
+    const TransactionExecutive& executive, std::unique_ptr<CallParameters> params)
+{
     auto message = m_executionMessageFactory->createExecutionMessage();
     switch (params->type)
     {
@@ -1283,11 +1276,14 @@ void TransactionExecutor::externalCall(std::shared_ptr<BlockContext> blockContex
         message->setFrom(std::move(params->senderAddress));
         message->setTo(std::move(params->receiveAddress));
         message->setType(ExecutionMessage::MESSAGE);
+        message->setKeyLocks(std::move(params->keyLocks));
         break;
-    case CallParameters::WAIT_KEY:
-        message->setFrom(std::move(params->senderAddress));
-        message->setType(ExecutionMessage::WAIT_KEY);
+    case CallParameters::KEY_LOCK:
+        message->setFrom(params->senderAddress);
+        message->setTo(std::move(params->senderAddress));
+        message->setType(ExecutionMessage::KEY_LOCK);
         message->setKeyLockAcquired(std::move(params->acquireKeyLock));
+        message->setKeyLocks(std::move(params->keyLocks));
 
         break;
     case CallParameters::FINISHED:
@@ -1304,8 +1300,8 @@ void TransactionExecutor::externalCall(std::shared_ptr<BlockContext> blockContex
         break;
     }
 
-    message->setContextID(executive->contextID());
-    message->setSeq(executive->seq());
+    message->setContextID(executive.contextID());
+    message->setSeq(executive.seq());
     message->setOrigin(std::move(params->origin));
     message->setGasAvailable(params->gas);
 
@@ -1331,9 +1327,7 @@ void TransactionExecutor::externalCall(std::shared_ptr<BlockContext> blockContex
     message->setLogEntries(std::move(params->logEntries));
     message->setNewEVMContractAddress(std::move(params->newEVMContractAddress));
 
-    message->setKeyLocks(std::move(params->keyLocks));
-
-    it->requestFunction(nullptr, std::move(message));
+    return message;
 }
 
 BlockContext::Ptr TransactionExecutor::createBlockContext(
@@ -1359,11 +1353,8 @@ TransactionExecutive::Ptr TransactionExecutor::createExecutive(
     const std::shared_ptr<BlockContext>& _blockContext, const std::string& _contractAddress,
     int64_t contextID, int64_t seq)
 {
-    auto executive =
-        std::make_shared<TransactionExecutive>(_blockContext, _contractAddress, contextID, seq,
-            std::bind(&TransactionExecutor::externalCall, this, std::placeholders::_1,
-                std::placeholders::_2, std::placeholders::_3, std::placeholders::_4),
-            m_gasInjector);
+    auto executive = std::make_shared<TransactionExecutive>(
+        _blockContext, _contractAddress, contextID, seq, m_gasInjector);
 
     executive->setConstantPrecompiled(m_constantPrecompiled);
     executive->setEVMPrecompiled(m_precompiledContract);
@@ -1506,7 +1497,7 @@ void TransactionExecutor::removeCommittedState()
 }
 
 std::unique_ptr<CallParameters> TransactionExecutor::createCallParameters(
-    bcos::protocol::ExecutionMessage&& input, bool staticCall)
+    bcos::protocol::ExecutionMessage& input, bool staticCall)
 {
     auto callParameters = std::make_unique<CallParameters>(CallParameters::MESSAGE);
 
@@ -1540,7 +1531,7 @@ std::unique_ptr<CallParameters> TransactionExecutor::createCallParameters(
 }
 
 std::unique_ptr<CallParameters> TransactionExecutor::createCallParameters(
-    bcos::protocol::ExecutionMessage&& input, const bcos::protocol::Transaction& tx)
+    bcos::protocol::ExecutionMessage& input, const bcos::protocol::Transaction& tx)
 {
     auto callParameters = std::make_unique<CallParameters>(CallParameters::MESSAGE);
 

@@ -36,7 +36,9 @@
 #include <boost/exception/diagnostic_information.hpp>
 #include <boost/lexical_cast.hpp>
 #include <boost/throw_exception.hpp>
+#include <exception>
 #include <functional>
+#include <memory>
 #include <string>
 
 using namespace std;
@@ -50,78 +52,120 @@ using namespace bcos::precompiled;
 /// Error info for VMInstance status code.
 using errinfo_evmcStatusCode = boost::error_info<struct tag_evmcStatusCode, evmc_status_code>;
 
-void TransactionExecutive::start(CallParameters::UniquePtr input)
+CallParameters::UniquePtr TransactionExecutive::start(CallParameters::UniquePtr input)
 {
-    m_pushMessage = std::make_unique<Coroutine::push_type>([this](Coroutine::pull_type& source) {
-        m_pullMessage = std::make_unique<Coroutine::pull_type>(std::move(source));
-        auto callParameters = m_pullMessage->get();
+    m_pullMessage.emplace([this, inputPtr = input.release()](Coroutine::push_type& push) {
+        COROUTINE_TRACE_LOG(TRACE, m_contextID, m_seq) << "Create new coroutine";
 
+        // Take ownership from input
+        m_pushMessage.emplace(std::move(push));
+
+        auto callParameters = std::unique_ptr<CallParameters>(inputPtr);
         auto blockContext = m_blockContext.lock();
         if (!blockContext)
         {
             BOOST_THROW_EXCEPTION(BCOS_ERROR(-1, "blockContext is null"));
         }
 
-        m_storageWrapper = std::make_unique<CoroutineStorageWrapper<CoroutineMessage>>(
-            blockContext->storage(), *m_pushMessage, *m_pullMessage,
+        m_storageWrapper = std::make_unique<SyncStorageWrapper>(blockContext->storage(),
             std::bind(&TransactionExecutive::externalAcquireKeyLocks, this, std::placeholders::_1),
             m_recoder);
 
-        execute(std::move(std::get<CallParameters::UniquePtr>(callParameters)));
+        if (!m_initKeyLocks.empty())
+        {
+            m_storageWrapper->importExistsKeyLocks(m_initKeyLocks);
+            m_initKeyLocks.clear();
+        }
+
+        m_exchangeMessage = execute(std::move(callParameters));
+        // Execute is finished, erase the key locks
+        m_exchangeMessage->keyLocks.clear();
+
+        // Return the ownership to input
+        push = std::move(*m_pushMessage);
+
+        COROUTINE_TRACE_LOG(TRACE, m_contextID, m_seq) << "Finish coroutine executing";
     });
 
-    pushMessage(std::move(input));
+    return dispatcher();
+}
+
+CallParameters::UniquePtr TransactionExecutive::dispatcher()
+{
+    try
+    {
+        for (auto it = std::begin(*m_pullMessage); it != std::end(*m_pullMessage); ++it)
+        {
+            if (*it)
+            {
+                COROUTINE_TRACE_LOG(TRACE, m_contextID, m_seq)
+                    << "Context switch to main coroutine to call func";
+                (*it)(ResumeHandler(*this));
+            }
+
+            if (m_exchangeMessage)
+            {
+                COROUTINE_TRACE_LOG(TRACE, m_contextID, m_seq)
+                    << "Context switch to main coroutine to return output";
+                return std::move(m_exchangeMessage);
+            }
+        }
+    }
+    catch (std::exception& e)
+    {
+        COROUTINE_TRACE_LOG(TRACE, m_contextID, m_seq)
+            << "Error while dispatch, " << boost::diagnostic_information(e);
+        BOOST_THROW_EXCEPTION(BCOS_ERROR_WITH_PREV(-1, "Error while dispatch", e));
+    }
+
+    COROUTINE_TRACE_LOG(TRACE, m_contextID, m_seq) << "Context switch to main coroutine, Finished!";
+    return std::move(m_exchangeMessage);
 }
 
 CallParameters::UniquePtr TransactionExecutive::externalCall(CallParameters::UniquePtr input)
 {
     input->keyLocks = m_storageWrapper->exportKeyLocks();
 
-    m_externalCallFunction(m_blockContext.lock(), shared_from_this(), std::move(input),
-        [this]([[maybe_unused]] Error::UniquePtr error, CallParameters::UniquePtr response) {
-            EXECUTOR_LOG(TRACE) << "Invoke external call callback";
-            (*m_pushMessage)(CallMessage(std::move(response)));
-        });
+    spawnAndCall([this, inputPtr = input.release()](
+                     ResumeHandler) { m_exchangeMessage = CallParameters::UniquePtr(inputPtr); });
 
-    (*m_pullMessage)();  // move to the main coroutine
-    auto output = std::get<CallMessage>(m_pullMessage->get());
+    // When resume, exchangeMessage set to output
+    auto output = std::move(m_exchangeMessage);
 
     // After coroutine switch, set the recoder
     m_storageWrapper->setRecoder(m_recoder);
 
     // Set the keyLocks
-    m_storageWrapper->setExistsKeyLocks(output->keyLocks);
+    m_storageWrapper->importExistsKeyLocks(output->keyLocks);
 
     return output;
 }
 
 void TransactionExecutive::externalAcquireKeyLocks(std::string acquireKeyLock)
 {
-    auto callParameters = std::make_unique<CallParameters>(CallParameters::WAIT_KEY);
+    EXECUTOR_LOG(TRACE) << "Executor acquire key lock: " << acquireKeyLock;
+
+    auto callParameters = std::make_unique<CallParameters>(CallParameters::KEY_LOCK);
     callParameters->senderAddress = m_contractAddress;
     callParameters->keyLocks = m_storageWrapper->exportKeyLocks();
     callParameters->acquireKeyLock = std::move(acquireKeyLock);
 
-    m_externalCallFunction(m_blockContext.lock(), shared_from_this(), std::move(callParameters),
-        [this]([[maybe_unused]] Error::UniquePtr error, CallParameters::UniquePtr response) {
-            EXECUTOR_LOG(TRACE) << "Invoke external call callback";
-            (*m_pushMessage)(CallMessage(std::move(response)));
-        });
+    spawnAndCall([this, inputPtr = callParameters.release()](
+                     ResumeHandler) { m_exchangeMessage = CallParameters::UniquePtr(inputPtr); });
 
-    (*m_pullMessage)();  // move to the main coroutine
-    auto output = std::get<CallMessage>(m_pullMessage->get());
-
+    auto output = std::move(m_exchangeMessage);
     if (output->status == CallParameters::REVERT)
     {
         // Dead lock, revert
-        BOOST_THROW_EXCEPTION(BCOS_ERROR(ExecuteError::DEAD_LOCK, "Dead lock detected"));
+        BOOST_THROW_EXCEPTION(
+            BCOS_ERROR(ExecuteError::DEAD_LOCK, "Dead lock detected, revert transaction"));
     }
 
     // After coroutine switch, set the recoder
     m_storageWrapper->setRecoder(m_recoder);
 
     // Set the keyLocks
-    m_storageWrapper->setExistsKeyLocks(output->keyLocks);
+    m_storageWrapper->importExistsKeyLocks(output->keyLocks);
 }
 
 CallParameters::UniquePtr TransactionExecutive::execute(CallParameters::UniquePtr callParameters)
@@ -150,11 +194,7 @@ CallParameters::UniquePtr TransactionExecutive::execute(CallParameters::UniquePt
             hostContext->evmSchedule().suicideRefundGas * hostContext->sub().suicides.size();
     }
 
-    // Current executive is finished
-    m_finished = true;
-    m_externalCallFunction(m_blockContext.lock(), shared_from_this(), std::move(callResults), {});
-
-    return nullptr;
+    return callResults;
 }
 
 std::tuple<std::unique_ptr<HostContext>, CallParameters::UniquePtr> TransactionExecutive::call(
@@ -482,7 +522,6 @@ CallParameters::UniquePtr TransactionExecutive::go(
                 hostContext.setCode(outputRef.toBytes());
             }
 
-
             callResults->gas -= outputRef.size() * hostContext.evmSchedule().createDataGas;
             callResults->newEVMContractAddress = callResults->codeAddress;
 
@@ -576,6 +615,11 @@ CallParameters::UniquePtr TransactionExecutive::go(
     }
 
     return nullptr;
+}
+
+void TransactionExecutive::spawnAndCall(std::function<void(ResumeHandler)> function)
+{
+    (*m_pushMessage)(std::move(function));
 }
 
 std::shared_ptr<precompiled::PrecompiledExecResult> TransactionExecutive::execPrecompiled(
@@ -832,19 +876,25 @@ void TransactionExecutive::creatAuthTable(
         admin = entry->getField(0);
     }
     auto table = m_storageWrapper->createTable(authTableName, STORAGE_VALUE);
-    auto adminEntry = table->newEntry();
 
-    adminEntry.setField(STORAGE_VALUE, std::string(admin));
-    auto typeEntry = table->newEntry();
-    typeEntry.setField(STORAGE_VALUE, std::string(""));
-    auto whiteEntry = table->newEntry();
-    typeEntry.setField(STORAGE_VALUE, std::string(""));
-    auto blackEntry = table->newEntry();
-    typeEntry.setField(STORAGE_VALUE, std::string(""));
-    m_storageWrapper->setRow(authTableName, ADMIN_FIELD, std::move(adminEntry));
-    m_storageWrapper->setRow(authTableName, METHOD_AUTH_TYPE, std::move(typeEntry));
-    m_storageWrapper->setRow(authTableName, METHOD_AUTH_WHITE, std::move(whiteEntry));
-    m_storageWrapper->setRow(authTableName, METHOD_AUTH_BLACK, std::move(blackEntry));
+    if (table)
+    {
+        Entry adminEntry(table->tableInfo());
+        adminEntry.importFields({std::string(admin)});
+        m_storageWrapper->setRow(authTableName, ADMIN_FIELD, std::move(adminEntry));
+
+        Entry emptyType;
+        emptyType.importFields({""});
+        m_storageWrapper->setRow(authTableName, METHOD_AUTH_TYPE, std::move(emptyType));
+
+        Entry emptyWhite;
+        emptyType.importFields({""});
+        m_storageWrapper->setRow(authTableName, METHOD_AUTH_WHITE, std::move(emptyWhite));
+
+        Entry emptyBlack;
+        emptyBlack.importFields({""});
+        m_storageWrapper->setRow(authTableName, METHOD_AUTH_BLACK, std::move(emptyBlack));
+    }
 }
 
 bool TransactionExecutive::buildBfsPath(std::string const& _absoluteDir)

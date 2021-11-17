@@ -153,19 +153,22 @@ private:
         std::function<void(bcos::Error::UniquePtr&&, bcos::protocol::ExecutionMessage::UniquePtr&&)>
             callback);
 
-    void externalCall(std::shared_ptr<BlockContext> blockContext,
-        std::shared_ptr<TransactionExecutive> executive,
-        std::unique_ptr<CallParameters> callResults,
-        std::function<void(Error::UniquePtr, std::unique_ptr<CallParameters>)> callback);
+    std::unique_ptr<protocol::ExecutionMessage> toExecutionResult(
+        const TransactionExecutive& executive, std::unique_ptr<CallParameters> params);
 
     std::unique_ptr<CallParameters> createCallParameters(
-        bcos::protocol::ExecutionMessage&& inputs, bool staticCall);
+        bcos::protocol::ExecutionMessage& inputs, bool staticCall);
 
     std::unique_ptr<CallParameters> createCallParameters(
-        bcos::protocol::ExecutionMessage&& input, const bcos::protocol::Transaction& tx);
+        bcos::protocol::ExecutionMessage& input, const bcos::protocol::Transaction& tx);
 
     std::optional<std::vector<bcos::bytes>> decodeConflictFields(
         const FunctionAbi& functionAbi, const CallParameters& prams);
+
+    std::function<void(
+        const TransactionExecutive& executive, std::unique_ptr<CallParameters> input)>
+    createExternalFunctionCall(std::function<void(
+            bcos::Error::UniquePtr&&, bcos::protocol::ExecutionMessage::UniquePtr&&)>& callback);
 
     void initPrecompiled();
 

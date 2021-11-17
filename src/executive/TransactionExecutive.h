@@ -24,7 +24,7 @@
 #include "../Common.h"
 #include "../precompiled/PrecompiledResult.h"
 #include "BlockContext.h"
-#include "CoroutineStorageWrapper.h"
+#include "SyncStorageWrapper.h"
 #include "bcos-executor/TransactionExecutor.h"
 #include "bcos-framework/interfaces/executor/ExecutionMessage.h"
 #include "bcos-framework/interfaces/protocol/BlockHeader.h"
@@ -63,27 +63,34 @@ class TransactionExecutive : public std::enable_shared_from_this<TransactionExec
 public:
     using Ptr = std::shared_ptr<TransactionExecutive>;
 
-    using CallMessage = CallParameters::UniquePtr;
+    class ResumeHandler;
 
-    using CoroutineMessage = std::variant<CallMessage, GetPrimaryKeysReponse, GetRowResponse,
-        GetRowsResponse, SetRowResponse, OpenTableResponse>;
-
+    using CoroutineMessage = std::function<void(ResumeHandler resume)>;
     using Coroutine = boost::coroutines2::coroutine<CoroutineMessage>;
 
+    class ResumeHandler
+    {
+    public:
+        ResumeHandler(TransactionExecutive& executive) : m_executive(executive) {}
+
+        void operator()()
+        {
+            COROUTINE_TRACE_LOG(TRACE, m_executive.contextID(), m_executive.seq())
+                << "Context switch to executive coroutine, from ResumeHandler";
+            (*m_executive.m_pullMessage)();
+        }
+
+    private:
+        TransactionExecutive& m_executive;
+    };
+
     TransactionExecutive(std::weak_ptr<BlockContext> blockContext, std::string contractAddress,
-        int64_t contextID, int64_t seq,
-        std::function<void(std::shared_ptr<BlockContext>, std::shared_ptr<TransactionExecutive>,
-            std::unique_ptr<CallParameters>,
-            std::function<void(Error::UniquePtr, std::unique_ptr<CallParameters>)>)>
-            externalCallCallback,
-        std::shared_ptr<wasm::GasInjector>& gasInjector)
+        int64_t contextID, int64_t seq, std::shared_ptr<wasm::GasInjector>& gasInjector)
       : m_blockContext(std::move(blockContext)),
         m_contractAddress(std::move(contractAddress)),
         m_contextID(contextID),
         m_seq(seq),
-        m_externalCallFunction(std::move(externalCallCallback)),
         m_gasInjector(gasInjector)
-    // m_gasInjector(std::make_shared<wasm::GasInjector>(wasm::GetInstructionTable()))
     {
         m_recoder = m_blockContext.lock()->storage()->newRecoder();
         m_hashImpl = m_blockContext.lock()->hashHandler();
@@ -96,12 +103,8 @@ public:
 
     virtual ~TransactionExecutive() = default;
 
-    void start(CallParameters::UniquePtr input);  // start a new coroutine to execute
-
-    void pushMessage(CoroutineMessage message)  // call by executor
-    {
-        (*m_pushMessage)(std::move(message));
-    }
+    CallParameters::UniquePtr start(CallParameters::UniquePtr input);  // start a new coroutine to
+                                                                       // execute
 
     // External call request
     CallParameters::UniquePtr externalCall(CallParameters::UniquePtr input);  // call by
@@ -110,7 +113,7 @@ public:
     // External request key locks
     void externalAcquireKeyLocks(std::string acquireKeyLock);
 
-    CoroutineStorageWrapper<CoroutineMessage>& storage()
+    auto& storage()
     {
         assert(m_storageWrapper);
         return *m_storageWrapper;
@@ -118,8 +121,8 @@ public:
 
     std::weak_ptr<BlockContext> blockContext() { return m_blockContext; }
 
-    int64_t contextID() { return m_contextID; }
-    int64_t seq() { return m_seq; }
+    int64_t contextID() const { return m_contextID; }
+    int64_t seq() const { return m_seq; }
 
     std::string_view contractAddress() { return m_contractAddress; }
 
@@ -158,7 +161,27 @@ public:
     std::shared_ptr<precompiled::PrecompiledExecResult> execPrecompiled(const std::string& address,
         bytesConstRef param, const std::string& origin, const std::string& sender);
 
+    void setInitKeyLocks(std::vector<std::string> initKeyLocks)
+    {
+        m_initKeyLocks = std::move(initKeyLocks);
+    }
+
+    void setExchangeMessage(CallParameters::UniquePtr callParameters)
+    {
+        m_exchangeMessage = std::move(callParameters);
+    }
+
+    CallParameters::UniquePtr resume()
+    {
+        EXECUTOR_LOG(TRACE) << "Context switch to executive coroutine, from resume";
+        (*m_pullMessage)();
+
+        return dispatcher();
+    }
+
 private:
+    CallParameters::UniquePtr dispatcher();
+
     std::tuple<std::unique_ptr<HostContext>, CallParameters::UniquePtr> call(
         CallParameters::UniquePtr callParameters);
     std::tuple<std::unique_ptr<HostContext>, CallParameters::UniquePtr> callPrecompiled(
@@ -167,6 +190,8 @@ private:
         CallParameters::UniquePtr callParameters);
     CallParameters::UniquePtr go(
         HostContext& hostContext, CallParameters::UniquePtr extraData = nullptr);
+
+    void spawnAndCall(std::function<void(ResumeHandler)> function);
 
     void revert();
 
@@ -208,24 +233,17 @@ private:
     int64_t m_seq;
     crypto::Hash::Ptr m_hashImpl;
 
-    ///< The base amount of gas required for executing this transaction.
-    // TODO: not used
-    // int64_t m_baseGasRequired = 0;
-
-
-    std::function<void(std::shared_ptr<BlockContext> blockContext,
-        std::shared_ptr<TransactionExecutive> executive,
-        std::unique_ptr<CallParameters> callResults,
-        std::function<void(Error::UniquePtr, std::unique_ptr<CallParameters>)> callback)>
-        m_externalCallFunction;
+    std::vector<std::string> m_initKeyLocks;
 
     std::shared_ptr<wasm::GasInjector> m_gasInjector = nullptr;
 
-    std::unique_ptr<Coroutine::push_type> m_pushMessage;
-    std::unique_ptr<Coroutine::pull_type> m_pullMessage;
     bcos::storage::StateStorage::Recoder::Ptr m_recoder;
-    std::unique_ptr<CoroutineStorageWrapper<CoroutineMessage>> m_storageWrapper;
+    std::unique_ptr<SyncStorageWrapper> m_storageWrapper;
+    CallParameters::UniquePtr m_exchangeMessage = nullptr;
     bool m_finished = false;
+
+    std::optional<Coroutine::pull_type> m_pullMessage;
+    std::optional<Coroutine::push_type> m_pushMessage;
 };
 
 }  // namespace executor

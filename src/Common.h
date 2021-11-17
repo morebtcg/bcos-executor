@@ -45,6 +45,8 @@ DERIVE_BCOS_EXCEPTION(InvalidEncoding);
 namespace executor
 {
 #define EXECUTOR_LOG(LEVEL) BCOS_LOG(LEVEL) << LOG_BADGE("EXECUTOR")
+#define COROUTINE_TRACE_LOG(LEVEL, contextID, seq) \
+    BCOS_LOG(LEVEL) << LOG_BADGE("EXECUTOR") << "[" << contextID << "," << seq << "]"
 #define PARA_LOG(LEVEL) BCOS_LOG(LEVEL) << LOG_BADGE("PARA") << LOG_BADGE(utcTime())
 
 enum ExecuteError : int32_t
@@ -116,32 +118,6 @@ struct SubState
         refunds = 0;
     }
 };
-
-/**
- * @brief : execute the opcode of evm
- *
- */
-
-inline bcos::protocol::ExecutionMessage::UniquePtr toExecutionResult(
-    bcos::protocol::ExecutionMessageFactory& factory, CallParameters::UniquePtr callResults)
-{
-    auto executionResult = factory.createExecutionMessage();
-
-    executionResult->setStatus(callResults->status);
-    executionResult->setMessage(std::move(callResults->message));
-    // executionResult->setStaticCall(callResults->status)
-    if (callResults->createSalt)
-    {
-        executionResult->setCreateSalt(std::move(*callResults->createSalt));
-    }
-    executionResult->setGasAvailable(callResults->gas);
-    executionResult->setLogEntries(std::move(callResults->logEntries));
-    executionResult->setData(std::move(callResults->data));
-    executionResult->setTo(std::move(callResults->receiveAddress));
-    executionResult->setNewEVMContractAddress(std::move(callResults->newEVMContractAddress));
-
-    return executionResult;
-}
 
 struct EVMSchedule
 {
