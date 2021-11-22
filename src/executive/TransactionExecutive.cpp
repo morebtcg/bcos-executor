@@ -216,12 +216,12 @@ std::tuple<std::unique_ptr<HostContext>, CallParameters::UniquePtr> TransactionE
         // check permission first
         if (blockContext->isAuthCheck())
         {
-            if (!checkAuth(callParameters))
+            if (!checkAuth(callParameters, false))
             {
                 revert();
                 callParameters->status = (int32_t)TransactionStatus::PermissionDenied;
                 callParameters->type = CallParameters::REVERT;
-                callParameters->message = "Permission deny.";
+                callParameters->message = "Permission denied.";
                 EXECUTIVE_LOG(ERROR) << callParameters->message << LOG_KV("tableName", tableName);
                 return {nullptr, std::move(callParameters)};
             }
@@ -330,6 +330,21 @@ std::tuple<std::unique_ptr<HostContext>, CallParameters::UniquePtr> TransactionE
     }
 
     auto newAddress = string(callParameters->codeAddress);
+
+    // check permission first
+    if (blockContext->isAuthCheck())
+    {
+        if (!checkAuth(callParameters, true))
+        {
+            revert();
+            callParameters->status = (int32_t)TransactionStatus::PermissionDenied;
+            callParameters->type = CallParameters::REVERT;
+            callParameters->message = "Permission denied.";
+            EXECUTIVE_LOG(ERROR) << callParameters->message
+                                 << LOG_KV("originAddress", callParameters->origin);
+            return {nullptr, std::move(callParameters)};
+        }
+    }
 
     // Create the table first
     auto tableName = getContractTableName(newAddress);
@@ -520,9 +535,16 @@ CallParameters::UniquePtr TransactionExecutive::go(
             {
                 if (outputRef.empty())
                 {
-                    EXECUTOR_LOG(ERROR) << "Create contract with empty code!";
-                    BOOST_THROW_EXCEPTION(BCOS_ERROR(bcos::executor::ExecuteError::EXECUTE_ERROR,
-                        "Create contract with empty code!"));
+                    EXECUTOR_LOG(ERROR) << "Create contract with empty code, wrong code input.";
+                    callResults->type = CallParameters::REVERT;
+                    callResults->status = (int32_t)TransactionStatus::Unknown;
+                    callResults->message = "Create contract with empty code, wrong code input.";
+                    // Clear the creation flag
+                    callResults->create = false;
+                    // Clear the data
+                    callResults->data.clear();
+                    revert();
+                    return callResults;
                 }
                 hostContext.setCode(outputRef.toBytes());
             }
@@ -600,13 +622,8 @@ CallParameters::UniquePtr TransactionExecutive::go(
     }
     catch (bcos::Error& e)
     {
-        EXECUTIVE_LOG(ERROR) << "bcos::Error: ("
-                             << *boost::get_error_info<errinfo_evmcStatusCode>(e) << ")\n"
+        EXECUTIVE_LOG(ERROR) << "bcos::Error: (" << e.errorMessage() << ")\n"
                              << diagnostic_information(e);
-        auto callResults = hostContext.takeCallParameters();
-        callResults->type = CallParameters::REVERT;
-        callResults->status = (int32_t)TransactionStatus::Unknown;
-        callResults->message = e.errorMessage();
         revert();
     }
     catch (InternalVMError const& _e)
@@ -889,7 +906,6 @@ void TransactionExecutive::creatAuthTable(
     std::string_view _tableName, std::string_view _origin, std::string_view _sender)
 {
     // Create the access table
-    // FIXME: use global variant,
     //  /sys/ not create
     if (_tableName.substr(0, 4) == "/sys/")
         return;
@@ -901,6 +917,10 @@ void TransactionExecutive::creatAuthTable(
         auto senderAuthTable = getContractTableName(_sender).append(CONTRACT_SUFFIX);
         auto entry = m_storageWrapper->getRow(std::move(senderAuthTable), ADMIN_FIELD);
         admin = entry->getField(0);
+    }
+    else
+    {
+        admin = _sender;
     }
     auto table = m_storageWrapper->createTable(authTableName, STORAGE_VALUE);
 
@@ -915,7 +935,7 @@ void TransactionExecutive::creatAuthTable(
         m_storageWrapper->setRow(authTableName, METHOD_AUTH_TYPE, std::move(emptyType));
 
         Entry emptyWhite;
-        emptyType.importFields({""});
+        emptyWhite.importFields({""});
         m_storageWrapper->setRow(authTableName, METHOD_AUTH_WHITE, std::move(emptyWhite));
 
         Entry emptyBlack;
@@ -980,6 +1000,9 @@ bool TransactionExecutive::buildBfsPath(std::string const& _absoluteDir)
         // not exist, then create table and write in parent dir
         auto newFileEntry = table->newEntry();
         newFileEntry.setField(FS_FIELD_TYPE, FS_TYPE_DIR);
+        newFileEntry.setField(FS_ACL_TYPE, "0");
+        newFileEntry.setField(FS_ACL_WHITE, "");
+        newFileEntry.setField(FS_ACL_BLACK, "");
         newFileEntry.setField(FS_FIELD_EXTRA, "");
         table->setRow(dir, std::move(newFileEntry));
 
@@ -990,19 +1013,28 @@ bool TransactionExecutive::buildBfsPath(std::string const& _absoluteDir)
     auto table = m_storageWrapper->openTable(root);
     auto newFileEntry = table->newEntry();
     newFileEntry.setField(FS_FIELD_TYPE, FS_TYPE_CONTRACT);
+    newFileEntry.setField(FS_ACL_TYPE, "0");
+    newFileEntry.setField(FS_ACL_WHITE, "");
+    newFileEntry.setField(FS_ACL_BLACK, "");
     newFileEntry.setField(FS_FIELD_EXTRA, "");
     table->setRow(baseName, std::move(newFileEntry));
     return true;
 }
 
-bool TransactionExecutive::checkAuth(const CallParameters::UniquePtr& callParameters)
+bool TransactionExecutive::checkAuth(
+    const CallParameters::UniquePtr& callParameters, bool _isCreate)
 {
-    auto path = string(callParameters->codeAddress);
-    EXECUTIVE_LOG(DEBUG) << "check call auth" << LOG_KV("path", path);
-    Address address(callParameters->origin);
-    bytesRef func = ref(callParameters->data).getCroppedData(0, 4);
     auto blockContext = m_blockContext.lock();
     auto contractAuthPrecompiled =
         std::make_shared<ContractAuthPrecompiled>(blockContext->hashHandler());
+    Address address(callParameters->origin);
+    auto path = string(callParameters->codeAddress);
+    EXECUTIVE_LOG(DEBUG) << "check auth" << LOG_KV("codeAddress", path)
+                         << LOG_KV("originAddress", address.hex());
+    if (_isCreate)
+    {
+        return contractAuthPrecompiled->checkDeployAuth(shared_from_this(), address);
+    }
+    bytesRef func = ref(callParameters->data).getCroppedData(0, 4);
     return contractAuthPrecompiled->checkMethodAuth(shared_from_this(), path, func, address);
 }

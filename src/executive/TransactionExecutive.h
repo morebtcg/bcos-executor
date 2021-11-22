@@ -207,15 +207,25 @@ private:
 
     inline std::string getContractTableName(const std::string_view& _address)
     {
+        auto blockContext = m_blockContext.lock();
         std::string addressLower(_address);
         boost::algorithm::to_lower(addressLower);
 
         std::string address = (_address[0] == '/') ? addressLower.substr(1) : addressLower;
 
+        if (blockContext->isAuthCheck())
+        {
+            std::stringstream prefix;
+            prefix << std::setfill('0') << std::setw(35) << 1;
+            if (_address.find(prefix.str()) == 0)
+            {
+                return std::string("/sys/").append(address);
+            }
+        }
         return std::string("/apps/").append(address);
     }
 
-    bool checkAuth(const CallParameters::UniquePtr& callParameters);
+    bool checkAuth(const CallParameters::UniquePtr& callParameters, bool _isCreate);
 
     void creatAuthTable(
         std::string_view _tableName, std::string_view _origin, std::string_view _sender);
