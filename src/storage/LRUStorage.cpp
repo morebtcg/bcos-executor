@@ -78,17 +78,27 @@ void LRUStorage::asyncSetRow(std::string_view table, std::string_view key,
 
 void LRUStorage::merge(bool onlyDirty, const TraverseStorageInterface& source)
 {
+    if (&source == this)
+    {
+        EXECUTOR_LOG(ERROR) << "Can't merge from self!";
+        BOOST_THROW_EXCEPTION(BCOS_ERROR(-1, "Can't merge from self!"));
+    }
+
+    std::atomic_size_t count = 0;
     source.parallelTraverse(
-        onlyDirty, [this](const std::string_view& table, const std::string_view& key,
+        onlyDirty, [this, &count](const std::string_view& table, const std::string_view& key,
                        const storage::Entry& entry) {
             asyncSetRow(table, key, entry, [](Error::UniquePtr) {});
+            ++count;
             return true;
         });
+
+    EXECUTOR_LOG(INFO) << "Successfull merged " << count << " records";
 }
 
 void LRUStorage::start()
 {
-    EXECUTOR_LOG(TRACE) << "Starting thread";
+    EXECUTOR_LOG(TRACE) << "Starting lru cleaner thread";
     m_running = true;
     m_worker = std::make_unique<std::thread>([self = shared_from_this()]() { self->startLoop(); });
 }

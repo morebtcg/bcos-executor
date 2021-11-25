@@ -150,6 +150,7 @@ void TransactionExecutor::nextBlockHeader(const bcos::protocol::BlockHeader::Con
                     return;
                 }
 
+                prev.storage->setReadOnly(true);
                 stateStorage = std::make_shared<bcos::storage::StateStorage>(prev.storage);
             }
 
