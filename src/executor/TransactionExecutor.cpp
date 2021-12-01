@@ -1030,7 +1030,7 @@ void TransactionExecutor::asyncExecute(std::shared_ptr<BlockContext> blockContex
 
                 auto contextID = input->contextID();
                 auto seq = input->seq();
-                auto callParameters = createCallParameters(*input, std::move(*tx));
+                auto callParameters = createCallParameters(*input, *tx);
 
                 auto executive =
                     createExecutive(blockContext, callParameters->codeAddress, contextID, seq);
@@ -1439,7 +1439,8 @@ void TransactionExecutor::initPrecompiled()
     auto consensusPrecompiled = std::make_shared<precompiled::ConsensusPrecompiled>(m_hashImpl);
     auto cnsPrecompiled = std::make_shared<precompiled::CNSPrecompiled>(m_hashImpl);
     // FIXME: not support crud now
-    // auto tableFactoryPrecompiled = std::make_shared<precompiled::TableFactoryPrecompiled>(m_hashImpl);
+    // auto tableFactoryPrecompiled =
+    // std::make_shared<precompiled::TableFactoryPrecompiled>(m_hashImpl);
     auto kvTableFactoryPrecompiled =
         std::make_shared<precompiled::KVTableFactoryPrecompiled>(m_hashImpl);
 
