@@ -159,6 +159,9 @@ private:
     std::unique_ptr<protocol::ExecutionMessage> toExecutionResult(
         const TransactionExecutive& executive, std::unique_ptr<CallParameters> params);
 
+    std::unique_ptr<protocol::ExecutionMessage> toExecutionResult(
+        std::unique_ptr<CallParameters> params);
+
     std::unique_ptr<CallParameters> createCallParameters(
         bcos::protocol::ExecutionMessage& inputs, bool staticCall);
 
@@ -178,6 +181,7 @@ private:
     void removeCommittedState();
 
     void dagExecuteTransactionsForEvm(gsl::span<std::unique_ptr<CallParameters>> inputs,
+        const bcos::crypto::HashList& txHashList,
         std::function<void(
             bcos::Error::UniquePtr, std::vector<bcos::protocol::ExecutionMessage::UniquePtr>)>
             callback);

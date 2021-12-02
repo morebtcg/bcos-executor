@@ -223,8 +223,8 @@ void TransactionExecutor::dagExecuteTransactions(
     {
         m_txpool->asyncFillBlock(txHashes,
             [this, indexes = std::move(indexes), fillInputs = std::move(fillInputs),
-                callParametersList = std::move(callParametersList), callback = std::move(callback)](
-                Error::Ptr error, protocol::TransactionsPtr transactions) mutable {
+                callParametersList = std::move(callParametersList), callback = std::move(callback),
+                txHashes](Error::Ptr error, protocol::TransactionsPtr transactions) mutable {
                 if (error)
                 {
                     auto errorMessage = "asyncFillBlock failed";
@@ -247,7 +247,8 @@ void TransactionExecutor::dagExecuteTransactions(
                 }
                 else
                 {
-                    dagExecuteTransactionsForEvm(*callParametersList, std::move(callback));
+                    dagExecuteTransactionsForEvm(
+                        *callParametersList, *txHashes, std::move(callback));
                 }
             });
     }
@@ -259,12 +260,13 @@ void TransactionExecutor::dagExecuteTransactions(
         }
         else
         {
-            dagExecuteTransactionsForEvm(*callParametersList, std::move(callback));
+            dagExecuteTransactionsForEvm(*callParametersList, *txHashes, std::move(callback));
         }
     }
 }
 
 void TransactionExecutor::dagExecuteTransactionsForEvm(gsl::span<CallParameters::UniquePtr> inputs,
+    const bcos::crypto::HashList& txHashList,
     std::function<void(
         bcos::Error::UniquePtr, std::vector<bcos::protocol::ExecutionMessage::UniquePtr>)>
         callback)
@@ -284,7 +286,12 @@ void TransactionExecutor::dagExecuteTransactionsForEvm(gsl::span<CallParameters:
                 if (txsCriticals[i].empty())
                 {
                     serialTransactionsNum++;
+                    executionResults[i] = toExecutionResult(std::move(inputs[i]));
                     executionResults[i]->setType(ExecutionMessage::SEND_BACK);
+                    if (txHashList.size() > i)
+                    {
+                        executionResults[i]->setTransactionHash(txHashList[i]);
+                    }
                 }
             }
         });
@@ -395,6 +402,7 @@ void TransactionExecutor::dagExecuteTransactionsForWasm(
 
                 if (params->create)
                 {
+                    executionResults[i] = toExecutionResult(std::move(inputs[i]));
                     executionResults[i]->setType(ExecutionMessage::SEND_BACK);
                     continue;
                 }
@@ -439,6 +447,7 @@ void TransactionExecutor::dagExecuteTransactionsForWasm(
                             FunctionAbi::deserialize(abiStr, selector.toBytes(), m_hashImpl);
                         if (!functionAbi)
                         {
+                            executionResults[i] = toExecutionResult(std::move(inputs[i]));
                             executionResults[i]->setType(ExecutionMessage::SEND_BACK);
                             // If abi is not valid, we don't impact the cache. In such a
                             // situation, if the caller invokes this method over and over
@@ -1312,6 +1321,17 @@ TransactionExecutor::createExternalFunctionCall(
 std::unique_ptr<ExecutionMessage> TransactionExecutor::toExecutionResult(
     const TransactionExecutive& executive, std::unique_ptr<CallParameters> params)
 {
+    auto message = toExecutionResult(std::move(params));
+
+    message->setContextID(executive.contextID());
+    message->setSeq(executive.seq());
+
+    return message;
+}
+
+std::unique_ptr<protocol::ExecutionMessage> TransactionExecutor::toExecutionResult(
+    std::unique_ptr<CallParameters> params)
+{
     auto message = m_executionMessageFactory->createExecutionMessage();
     switch (params->type)
     {
@@ -1343,8 +1363,8 @@ std::unique_ptr<ExecutionMessage> TransactionExecutor::toExecutionResult(
         break;
     }
 
-    message->setContextID(executive.contextID());
-    message->setSeq(executive.seq());
+    message->setContextID(params->contextID);
+    message->setSeq(params->seq);
     message->setOrigin(std::move(params->origin));
     message->setGasAvailable(params->gas);
     message->setData(std::move(params->data));
@@ -1537,6 +1557,36 @@ std::unique_ptr<CallParameters> TransactionExecutor::createCallParameters(
 {
     auto callParameters = std::make_unique<CallParameters>(CallParameters::MESSAGE);
 
+    switch (input.type())
+    {
+    case ExecutionMessage::MESSAGE:
+    {
+        break;
+    }
+    case ExecutionMessage::REVERT:
+    {
+        callParameters->type = CallParameters::REVERT;
+        break;
+    }
+    case ExecutionMessage::FINISHED:
+    {
+        callParameters->type = CallParameters::FINISHED;
+        break;
+    }
+    case ExecutionMessage::KEY_LOCK:
+    {
+        break;
+    }
+    case ExecutionMessage::SEND_BACK:
+    case ExecutionMessage::REVERT_KEY_LOCK:
+    case ExecutionMessage::TXHASH:
+    {
+        BOOST_THROW_EXCEPTION(BCOS_ERROR(
+            ExecuteError::EXECUTE_ERROR, "Unexpected execution message type: " +
+                                             boost::lexical_cast<std::string>(input.type())));
+    }
+    }
+
     callParameters->contextID = input.contextID();
     callParameters->seq = input.seq();
     callParameters->origin = input.origin();
@@ -1548,7 +1598,7 @@ std::unique_ptr<CallParameters> TransactionExecutor::createCallParameters(
     callParameters->gas = input.gasAvailable();
     callParameters->staticCall = staticCall;
     callParameters->newEVMContractAddress = input.newEVMContractAddress();
-    callParameters->status = 0;
+    callParameters->status = input.status();
     callParameters->keyLocks = input.takeKeyLocks();
 
     return callParameters;
