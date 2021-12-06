@@ -153,6 +153,9 @@ void TransactionExecutive::externalAcquireKeyLocks(std::string acquireKeyLock)
     spawnAndCall([this, inputPtr = callParameters.release()](
                      ResumeHandler) { m_exchangeMessage = CallParameters::UniquePtr(inputPtr); });
 
+    // After coroutine switch, set the recoder, before the exception throw
+    m_storageWrapper->setRecoder(m_recoder);
+
     auto output = std::move(m_exchangeMessage);
     if (output->type == CallParameters::REVERT)
     {
@@ -161,9 +164,6 @@ void TransactionExecutive::externalAcquireKeyLocks(std::string acquireKeyLock)
             ExecuteError::DEAD_LOCK, "Dead lock detected, revert transaction: " +
                                          boost::lexical_cast<std::string>(output->type)));
     }
-
-    // After coroutine switch, set the recoder
-    m_storageWrapper->setRecoder(m_recoder);
 
     // Set the keyLocks
     m_storageWrapper->importExistsKeyLocks(output->keyLocks);
@@ -632,12 +632,18 @@ CallParameters::UniquePtr TransactionExecutive::go(
     {
         auto callResults = hostContext.takeCallParameters();
         callResults->type = CallParameters::REVERT;
-        callResults->status = (int32_t)TransactionStatus::Unknown;
+        callResults->status = (int32_t)TransactionStatus::RevertInstruction;
         callResults->message = e.errorMessage();
 
-        EXECUTIVE_LOG(ERROR) << "bcos::Error: (" << e.errorMessage() << ")\n"
-                             << diagnostic_information(e);
+        EXECUTIVE_LOG(ERROR) << "BCOS Error: " << diagnostic_information(e);
         revert();
+
+        if (e.errorCode() == DEAD_LOCK)
+        {
+            // DEAD LOCK revert need provide sender and receiver
+            EXECUTOR_LOG(ERROR) << "Revert by dead lock, sender: " << callResults->senderAddress
+                                << " receiver: " << callResults->receiveAddress;
+        }
 
         return callResults;
     }
@@ -778,6 +784,8 @@ void TransactionExecutive::setConstantPrecompiled(
 
 void TransactionExecutive::revert()
 {
+    EXECUTOR_LOG(INFO) << "Revert transaction";
+
     auto blockContext = m_blockContext.lock();
     if (!blockContext)
     {
@@ -785,6 +793,7 @@ void TransactionExecutive::revert()
     }
 
     blockContext->storage()->rollback(*m_recoder);
+    m_recoder->clear();
 }
 
 CallParameters::UniquePtr TransactionExecutive::parseEVMCResult(
@@ -1044,7 +1053,7 @@ bool TransactionExecutive::buildBfsPath(std::string const& _absoluteDir)
             {
                 /// create table and build bfs info
                 bfsInfo.insert(std::make_pair(dir, FS_TYPE_DIR));
-                auto newTable = m_storageWrapper->createTable(root + dir, SYS_VALUE);
+                auto newTable = m_storageWrapper->createTable(root + dir, SYS_VALUE_FIELDS);
                 Entry tEntry, newSubEntry, aclTypeEntry, aclWEntry, aclBEntry, extraEntry;
                 std::map<std::string, std::string> newSubMap;
                 tEntry.importFields({FS_TYPE_DIR});
