@@ -147,6 +147,7 @@ void TransactionExecutive::externalAcquireKeyLocks(std::string acquireKeyLock)
 
     auto callParameters = std::make_unique<CallParameters>(CallParameters::KEY_LOCK);
     callParameters->senderAddress = m_contractAddress;
+    callParameters->receiveAddress = m_contractAddress;
     callParameters->keyLocks = m_storageWrapper->exportKeyLocks();
     callParameters->acquireKeyLock = std::move(acquireKeyLock);
 
@@ -643,10 +644,6 @@ CallParameters::UniquePtr TransactionExecutive::go(
             // DEAD LOCK revert need provide sender and receiver
             EXECUTOR_LOG(ERROR) << "Revert by dead lock, sender: " << callResults->senderAddress
                                 << " receiver: " << callResults->receiveAddress;
-
-            // Need revert self's data, change sender to self
-            callResults->senderAddress = m_contractAddress;
-            callResults->receiveAddress = m_contractAddress;
         }
 
         return callResults;

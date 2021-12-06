@@ -1333,36 +1333,32 @@ std::unique_ptr<protocol::ExecutionMessage> TransactionExecutor::toExecutionResu
     std::unique_ptr<CallParameters> params)
 {
     auto message = m_executionMessageFactory->createExecutionMessage();
+
     switch (params->type)
     {
     case CallParameters::MESSAGE:
-        message->setFrom(std::move(params->senderAddress));
-        message->setTo(std::move(params->receiveAddress));
         message->setType(ExecutionMessage::MESSAGE);
         message->setKeyLocks(std::move(params->keyLocks));
         break;
     case CallParameters::KEY_LOCK:
-        message->setFrom(params->senderAddress);
-        message->setTo(std::move(params->senderAddress));
         message->setType(ExecutionMessage::KEY_LOCK);
         message->setKeyLockAcquired(std::move(params->acquireKeyLock));
         message->setKeyLocks(std::move(params->keyLocks));
-
         break;
     case CallParameters::FINISHED:
-        // Response message, Swap the from and to
-        message->setFrom(std::move(params->receiveAddress));
-        message->setTo(std::move(params->senderAddress));
+        // Swap the sender and receiver when returning
+        params->senderAddress.swap(params->receiveAddress);
         message->setType(ExecutionMessage::FINISHED);
         break;
     case CallParameters::REVERT:
-        // Response message, Swap the from and to
-        message->setFrom(std::move(params->receiveAddress));
-        message->setTo(std::move(params->senderAddress));
+        // Swap the sender and receiver when returning
+        params->senderAddress.swap(params->receiveAddress);
         message->setType(ExecutionMessage::REVERT);
         break;
     }
 
+    message->setFrom(std::move(params->senderAddress));
+    message->setTo(std::move(params->receiveAddress));
     message->setContextID(params->contextID);
     message->setSeq(params->seq);
     message->setOrigin(std::move(params->origin));
