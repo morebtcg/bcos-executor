@@ -646,6 +646,7 @@ CallParameters::UniquePtr TransactionExecutive::go(
 
             // Need revert self's data, change sender to self
             callResults->senderAddress = m_contractAddress;
+            callResults->receiveAddress = m_contractAddress;
         }
 
         return callResults;
