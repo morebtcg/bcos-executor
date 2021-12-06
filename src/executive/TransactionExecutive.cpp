@@ -643,6 +643,9 @@ CallParameters::UniquePtr TransactionExecutive::go(
             // DEAD LOCK revert need provide sender and receiver
             EXECUTOR_LOG(ERROR) << "Revert by dead lock, sender: " << callResults->senderAddress
                                 << " receiver: " << callResults->receiveAddress;
+
+            // Need revert self's data, change sender to self
+            callResults->senderAddress = m_contractAddress;
         }
 
         return callResults;
