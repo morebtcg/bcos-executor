@@ -30,3 +30,19 @@
 *.exe
 *.out
 *.app
+
+# depencies and config files
+cmake/scripts/**
+cmake/scripts**
+cmake/deps/**
+build**
+.clang-format
+.vscode/**
+.idea/**
+.DS_Store
+deps/**
+
+# clangd
+.cache/
+.clangd/
+compile_commands.json
