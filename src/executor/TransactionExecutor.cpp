@@ -125,6 +125,7 @@ void TransactionExecutor::nextBlockHeader(const bcos::protocol::BlockHeader::Con
         {
             std::unique_lock<std::shared_mutex> lock(m_stateStoragesMutex);
             bcos::storage::StateStorage::Ptr stateStorage;
+            bcos::storage::StorageInterface::Ptr lastStateStorage;
             if (m_stateStorages.empty())
             {
                 if (m_cachedStorage)
@@ -135,6 +136,7 @@ void TransactionExecutor::nextBlockHeader(const bcos::protocol::BlockHeader::Con
                 {
                     stateStorage = std::make_shared<bcos::storage::StateStorage>(m_backendStorage);
                 }
+                lastStateStorage = m_lastStateStorage;
             }
             else
             {
@@ -151,10 +153,11 @@ void TransactionExecutor::nextBlockHeader(const bcos::protocol::BlockHeader::Con
                 }
 
                 prev.storage->setReadOnly(true);
+                lastStateStorage = prev.storage;
                 stateStorage = std::make_shared<bcos::storage::StateStorage>(prev.storage);
             }
-
-            m_blockContext = createBlockContext(blockHeader, stateStorage);
+            // set last commit state storage to blockContext, to auth read last block state
+            m_blockContext = createBlockContext(blockHeader, stateStorage, lastStateStorage);
             m_stateStorages.emplace_back(blockHeader->number(), stateStorage);
         }
 
@@ -628,7 +631,7 @@ void TransactionExecutor::call(bcos::protocol::ExecutionMessage::UniquePtr input
     {
     case protocol::ExecutionMessage::MESSAGE:
     {
-        bcos::protocol::BlockNumber number = m_lastCommitedBlockNumber;
+        bcos::protocol::BlockNumber number = m_lastCommittedBlockNumber;
         storage::StorageInterface::Ptr prev;
 
         if (m_cachedStorage)
@@ -886,7 +889,7 @@ void TransactionExecutor::commit(
 
             EXECUTOR_LOG(DEBUG) << "Commit success";
 
-            m_lastCommitedBlockNumber = blockNumber;
+            m_lastCommittedBlockNumber = blockNumber;
 
             removeCommittedState();
 
@@ -1384,10 +1387,11 @@ std::unique_ptr<protocol::ExecutionMessage> TransactionExecutor::toExecutionResu
 }
 
 BlockContext::Ptr TransactionExecutor::createBlockContext(
-    const protocol::BlockHeader::ConstPtr& currentHeader, storage::StateStorage::Ptr storage)
+    const protocol::BlockHeader::ConstPtr& currentHeader, storage::StateStorage::Ptr storage,
+    storage::StorageInterface::Ptr lastStorage)
 {
-    BlockContext::Ptr context = make_shared<BlockContext>(
-        storage, m_hashImpl, currentHeader, FiscoBcosScheduleV3, m_isWasm, m_isAuthCheck);
+    BlockContext::Ptr context = make_shared<BlockContext>(storage, lastStorage, m_hashImpl,
+        currentHeader, FiscoBcosScheduleV3, m_isWasm, m_isAuthCheck);
 
     return context;
 }
@@ -1532,6 +1536,10 @@ void TransactionExecutor::removeCommittedState()
 
         std::unique_lock<std::shared_mutex> lock(m_stateStoragesMutex);
         auto it = m_stateStorages.begin();
+        m_lastStateStorage = m_stateStorages.back().storage;
+        EXECUTOR_LOG(DEBUG) << "LatestStateStorage"
+                            << LOG_KV("storageNumber", m_stateStorages.back().number)
+                            << LOG_KV("commitNumber", number);
         it = m_stateStorages.erase(it);
         if (it != m_stateStorages.end())
         {
@@ -1543,6 +1551,10 @@ void TransactionExecutor::removeCommittedState()
     {
         std::unique_lock<std::shared_mutex> lock(m_stateStoragesMutex);
         auto it = m_stateStorages.begin();
+        m_lastStateStorage = m_stateStorages.back().storage;
+        EXECUTOR_LOG(DEBUG) << "LatestStateStorage"
+                            << LOG_KV("storageNumber", m_stateStorages.back().number)
+                            << LOG_KV("commitNumber", number);
         it = m_stateStorages.erase(it);
         if (it != m_stateStorages.end())
         {
