@@ -56,6 +56,7 @@
 #include "interfaces/storage/StorageInterface.h"
 #include "libprotocol/LogEntry.h"
 #include "tbb/flow_graph.h"
+#include <oneapi/tbb/concurrent_vector.h>
 #include <tbb/blocked_range.h>
 #include <tbb/parallel_for.h>
 #include <tbb/spin_mutex.h>
@@ -178,18 +179,18 @@ void TransactionExecutor::dagExecuteTransactions(
         bcos::Error::UniquePtr, std::vector<bcos::protocol::ExecutionMessage::UniquePtr>)>
         callback)
 {
-    // for fill block
-    tbb::spin_mutex txHashesMutex;
-    auto txHashes = make_shared<HashList>();
-    std::vector<size_t> indexes;
-    auto fillInputs = std::make_shared<std::vector<bcos::protocol::ExecutionMessage::UniquePtr>>();
+    // for tx hashes fill block
+    auto txHashes = std::make_shared<HashList>(inputs.size());
+    auto inputMessages =
+        std::make_shared<std::vector<bcos::protocol::ExecutionMessage::UniquePtr>>(inputs.size());
 
     // final result
     auto callParametersList =
         std::make_shared<std::vector<CallParameters::UniquePtr>>(inputs.size());
 
+    std::atomic_bool hasTxHash = false;
     tbb::parallel_for(tbb::blocked_range<size_t>(0, inputs.size()),
-        [this, &inputs, &callParametersList, &txHashes, &txHashesMutex, &indexes, &fillInputs](
+        [this, &inputs, &callParametersList, &txHashes, &inputMessages, &hasTxHash](
             const tbb::blocked_range<size_t>& range) {
             for (size_t i = range.begin(); i != range.end(); ++i)
             {
@@ -198,16 +199,15 @@ void TransactionExecutor::dagExecuteTransactions(
                 {
                 case ExecutionMessage::TXHASH:
                 {
-                    tbb::spin_mutex::scoped_lock lock(txHashesMutex);
-                    txHashes->emplace_back(params->transactionHash());
-                    indexes.emplace_back(i);
-                    fillInputs->emplace_back(std::move(params));
+                    hasTxHash = true;
+                    (*txHashes)[i] = (params->transactionHash());
+                    (*inputMessages)[i] = (std::move(params));
 
                     break;
                 }
                 case ExecutionMessage::MESSAGE:
                 {
-                    callParametersList->at(i) = createCallParameters(*params, false);
+                    (*callParametersList)[i] = createCallParameters(*params, false);
                     break;
                 }
                 default:
@@ -222,10 +222,10 @@ void TransactionExecutor::dagExecuteTransactions(
             }
         });
 
-    if (!txHashes->empty())
+    if (hasTxHash)
     {
         m_txpool->asyncFillBlock(txHashes,
-            [this, indexes = std::move(indexes), fillInputs = std::move(fillInputs),
+            [this, inputMessages = std::move(inputMessages),
                 callParametersList = std::move(callParametersList), callback = std::move(callback),
                 txHashes](Error::Ptr error, protocol::TransactionsPtr transactions) mutable {
                 if (error)
@@ -238,11 +238,16 @@ void TransactionExecutor::dagExecuteTransactions(
                     return;
                 }
 
-                for (size_t i = 0; i < transactions->size(); ++i)
-                {
-                    callParametersList->at(indexes[i]) =
-                        createCallParameters(*fillInputs->at(i), *transactions->at(i));
-                }
+                tbb::parallel_for(tbb::blocked_range<size_t>(0, transactions->size()),
+                    [this, &callParametersList, &inputMessages, &transactions](
+                        const tbb::blocked_range<size_t>& range) {
+                        for (size_t i = range.begin(); i != range.end(); ++i)
+                        {
+                            (*callParametersList)[i] =
+                                createCallParameters(*(*inputMessages)[i], *((*transactions)[i]));
+                        }
+                    });
+
 
                 if (m_isWasm)
                 {
@@ -280,7 +285,7 @@ void TransactionExecutor::dagExecuteTransactionsForEvm(gsl::span<CallParameters:
     // get criticals
     std::vector<std::vector<std::string>> txsCriticals;
     txsCriticals.resize(transactionsNum);
-    size_t serialTransactionsNum = 0;
+    std::atomic_size_t serialTransactionsNum = 0;
     tbb::parallel_for(tbb::blocked_range<uint64_t>(0, transactionsNum),
         [&](const tbb::blocked_range<uint64_t>& range) {
             for (uint64_t i = range.begin(); i < range.end(); i++)
@@ -1336,36 +1341,32 @@ std::unique_ptr<protocol::ExecutionMessage> TransactionExecutor::toExecutionResu
     std::unique_ptr<CallParameters> params)
 {
     auto message = m_executionMessageFactory->createExecutionMessage();
+
     switch (params->type)
     {
     case CallParameters::MESSAGE:
-        message->setFrom(std::move(params->senderAddress));
-        message->setTo(std::move(params->receiveAddress));
         message->setType(ExecutionMessage::MESSAGE);
         message->setKeyLocks(std::move(params->keyLocks));
         break;
     case CallParameters::KEY_LOCK:
-        message->setFrom(params->senderAddress);
-        message->setTo(std::move(params->senderAddress));
         message->setType(ExecutionMessage::KEY_LOCK);
         message->setKeyLockAcquired(std::move(params->acquireKeyLock));
         message->setKeyLocks(std::move(params->keyLocks));
-
         break;
     case CallParameters::FINISHED:
-        // Response message, Swap the from and to
-        message->setFrom(std::move(params->receiveAddress));
-        message->setTo(std::move(params->senderAddress));
+        // Swap the sender and receiver when returning
+        params->senderAddress.swap(params->receiveAddress);
         message->setType(ExecutionMessage::FINISHED);
         break;
     case CallParameters::REVERT:
-        // Response message, Swap the from and to
-        message->setFrom(std::move(params->receiveAddress));
-        message->setTo(std::move(params->senderAddress));
+        // Swap the sender and receiver when returning
+        params->senderAddress.swap(params->receiveAddress);
         message->setType(ExecutionMessage::REVERT);
         break;
     }
 
+    message->setFrom(std::move(params->senderAddress));
+    message->setTo(std::move(params->receiveAddress));
     message->setContextID(params->contextID);
     message->setSeq(params->seq);
     message->setOrigin(std::move(params->origin));

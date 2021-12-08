@@ -155,6 +155,7 @@ void TransactionExecutive::externalAcquireKeyLocks(std::string acquireKeyLock)
 
     auto callParameters = std::make_unique<CallParameters>(CallParameters::KEY_LOCK);
     callParameters->senderAddress = m_contractAddress;
+    callParameters->receiveAddress = m_contractAddress;
     callParameters->keyLocks = m_storageWrapper->exportKeyLocks();
     callParameters->acquireKeyLock = std::move(acquireKeyLock);
 
